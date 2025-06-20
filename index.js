@@ -136,11 +136,22 @@ function handleCreateRoom(ws, data) {
   
   console.log(`Room created: ${pin} by ${playerName}`);
   
-  ws.send(JSON.stringify({
+  // Send a response with complete room information
+  const responseData = {
     type: 'room_created',
     pin,
-    settings: room.settings
-  }));
+    creatorName: playerName,
+    settings: room.settings,
+    // Add a full response for debugging
+    debugInfo: {
+      timestamp: Date.now(),
+      roomCount: gameRooms.size,
+      clientCount: clients.size
+    }
+  };
+  
+  console.log('Sending room_created response:', JSON.stringify(responseData));
+  ws.send(JSON.stringify(responseData));
 }
 
 // Join an existing game room
@@ -311,7 +322,16 @@ wss.on('close', () => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
+  const serverInfo = {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    connections: {
+      total: wss.clients.size,
+      rooms: gameRooms.size
+    },
+    uptime: process.uptime()
+  };
+  res.status(200).json(serverInfo);
 });
 
 // Get active rooms (for debug)
