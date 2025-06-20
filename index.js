@@ -335,35 +335,64 @@ function handleJoinRoom(ws, data) {
       // We'll implement this next
       
     } else if (room.state === 'active') {
-      // Room is already active - this might be a reconnection or additional player
-      console.log(`Room is active, handling additional player ${playerName}`);
+      // Room is already active - check if this is the creator reconnecting
       
-      // Add as viewer since game is already active
-      const viewer = {
-        clientId: ws.id,
-        name: playerName
-      };
-      
-      room.viewers.push(viewer);
-      ws.room = room.id;
-      ws.isViewer = true;
-      ws.pinType = 'player';
-      
-      const viewerResponse = {
-        type: 'room_joined',
-        pin: pin,
-        playerPin: room.playerPin,
-        viewerPin: room.viewerPin,
-        creatorName: room.creator.name,
-        joinerName: room.joiner.name,
-        settings: room.settings,
-        isViewer: true,
-        viewerCount: room.viewers.length,
-        message: 'Game already active - joined as viewer'
-      };
-      
-      ws.send(JSON.stringify(viewerResponse));
-      broadcastViewerUpdate(room);
+      if (playerName === room.creator.name && !room.creator.clientId) {
+        // This is the creator reconnecting
+        console.log(`Creator ${playerName} reconnecting to active room`);
+        
+        room.creator.clientId = ws.id;
+        room.creator.connected = true;
+        ws.room = room.id;
+        ws.isViewer = false;
+        ws.pinType = 'player';
+        
+        const creatorResponse = {
+          type: 'room_joined',
+          pin: pin,
+          playerPin: room.playerPin,
+          viewerPin: room.viewerPin,
+          creatorName: room.creator.name,
+          joinerName: room.joiner.name,
+          settings: room.settings,
+          isViewer: false,
+          viewerCount: room.viewers.length,
+          gameActive: true
+        };
+        
+        ws.send(JSON.stringify(creatorResponse));
+        console.log('Creator reconnected successfully');
+        
+      } else {
+        // Room is already active - add as viewer
+        console.log(`Room is active, adding ${playerName} as viewer`);
+        
+        const viewer = {
+          clientId: ws.id,
+          name: playerName
+        };
+        
+        room.viewers.push(viewer);
+        ws.room = room.id;
+        ws.isViewer = true;
+        ws.pinType = 'player';
+        
+        const viewerResponse = {
+          type: 'room_joined',
+          pin: pin,
+          playerPin: room.playerPin,
+          viewerPin: room.viewerPin,
+          creatorName: room.creator.name,
+          joinerName: room.joiner.name,
+          settings: room.settings,
+          isViewer: true,
+          viewerCount: room.viewers.length,
+          message: 'Game already active - joined as viewer'
+        };
+        
+        ws.send(JSON.stringify(viewerResponse));
+        broadcastViewerUpdate(room);
+      }
     }
   }
 }
