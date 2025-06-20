@@ -6,7 +6,7 @@ const { randomUUID } = require('crypto');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3001;
+const port = process.env.PORT || 8080;
 
 // Enable CORS for all routes
 app.use(cors({
@@ -346,7 +346,19 @@ app.get('/api/rooms', (req, res) => {
   res.json(roomsInfo);
 });
 
+// Log WebSocket server info
+wss.on('listening', () => {
+  console.log(`WebSocket server is listening on port ${port}`);
+});
+
+// Log WebSocket errors
+wss.on('error', (error) => {
+  console.error('WebSocket server error:', error);
+});
+
 // Start the server
-server.listen(port, () => {
+server.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
+  console.log(`Health check available at: http://localhost:${port}/health`);
+  console.log(`WebSocket server ready for connections`);
 });
