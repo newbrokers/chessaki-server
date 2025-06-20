@@ -581,7 +581,7 @@ function handleLeaveRoom(ws) {
 // Check for dead connections and inactive rooms every 30 seconds
 const interval = setInterval(() => {
   const now = Date.now();
-  const INACTIVE_TIMEOUT = 60 * 1000; // 1 minute of inactivity
+  const INACTIVE_TIMEOUT = 5 * 60 * 1000; // 5 minutes of inactivity - give more time for players to join
   
   // Check for dead connections
   wss.clients.forEach((ws) => {
