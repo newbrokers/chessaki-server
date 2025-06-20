@@ -301,9 +301,10 @@ function handleJoinRoom(ws, data) {
       // Room is in lobby state - this is the SECOND player joining!
       console.log(`Second player ${playerName} joining lobby room - activating game!`);
       
-      // Set joiner info
+      // Set joiner info with client ID
       room.joiner.name = playerName;
       room.joiner.connected = true;
+      room.joiner.clientId = ws.id;
       room.originalJoinerName = playerName;
       
       // Activate the room
@@ -315,24 +316,26 @@ function handleJoinRoom(ws, data) {
       ws.isViewer = false;
       ws.pinType = 'player';
       
-      // Send response to joiner
+      // Send response to joiner with complete game settings
       const joinResponse = {
         type: 'room_joined',
         pin: pin,
         playerPin: room.playerPin,
         viewerPin: room.viewerPin,
         creatorName: room.creator.name,
-        settings: room.settings,
+        joinerName: playerName,
+        settings: room.settings, // Include all game settings from creator
         isViewer: false,
         viewerCount: room.viewers.length,
-        gameReady: true // Signal that both players are ready
+        gameReady: true,
+        gameActive: true // Signal that both players are ready
       };
       
       ws.send(JSON.stringify(joinResponse));
       console.log('Joiner connected - game ready to start');
       
-      // Now trigger the CREATOR to reconnect via a special endpoint or signal
-      // We'll implement this next
+      // Broadcast game start to all connected clients in the room
+      broadcastGameStart(room);
       
     } else if (room.state === 'active') {
       // Room is already active - check if this is the creator reconnecting
@@ -357,11 +360,15 @@ function handleJoinRoom(ws, data) {
           settings: room.settings,
           isViewer: false,
           viewerCount: room.viewers.length,
-          gameActive: true
+          gameActive: true,
+          gameReady: true
         };
         
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
+        
+        // Broadcast game start to synchronize both players
+        broadcastGameStart(room);
         
       } else {
         // Room is already active - add as viewer
@@ -429,6 +436,60 @@ function broadcastViewerUpdate(room) {
   });
   
   console.log(`Broadcast viewer update: ${room.viewers.length} viewers`);
+}
+
+// Broadcast game start to synchronize both players
+function broadcastGameStart(room) {
+  console.log('Broadcasting game start to both players...');
+  
+  const gameStartMsg = {
+    type: 'game_start',
+    creatorName: room.creator.name,
+    joinerName: room.joiner.name,
+    settings: room.settings,
+    playerPin: room.playerPin,
+    viewerPin: room.viewerPin,
+    viewerCount: room.viewers.length,
+    timestamp: Date.now() // Add synchronized timestamp
+  };
+  
+  console.log('Game start message:', JSON.stringify(gameStartMsg));
+  
+  // Send to creator if connected
+  if (room.creator.clientId) {
+    const creatorWs = clients.get(room.creator.clientId);
+    if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
+      console.log('Sending game start to creator');
+      creatorWs.send(JSON.stringify(gameStartMsg));
+    } else {
+      console.log('Creator WebSocket not available');
+    }
+  } else {
+    console.log('Creator clientId not set');
+  }
+  
+  // Send to joiner if exists and connected
+  if (room.joiner && room.joiner.clientId) {
+    const joinerWs = clients.get(room.joiner.clientId);
+    if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
+      console.log('Sending game start to joiner');
+      joinerWs.send(JSON.stringify(gameStartMsg));
+    } else {
+      console.log('Joiner WebSocket not available');
+    }
+  } else {
+    console.log('Joiner clientId not set');
+  }
+  
+  // Send to all viewers
+  room.viewers.forEach(viewer => {
+    const viewerWs = clients.get(viewer.clientId);
+    if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
+      viewerWs.send(JSON.stringify(gameStartMsg));
+    }
+  });
+  
+  console.log(`Broadcast game start complete`);
 }
 
 // Forward game messages between players
