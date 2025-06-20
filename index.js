@@ -121,7 +121,7 @@ function generatePin() {
   return letters + digits;
 }
 
-// Create a new game room with two PINs
+// Create a new game room with two PINs - NO WebSocket connection yet
 function handleCreateRoom(ws, data) {
   const { playerName, timeControl, totalGames, countdown } = data;
   
@@ -135,17 +135,21 @@ function handleCreateRoom(ws, data) {
     viewerPin = generatePin();
   } while (pinToRoom.has(viewerPin) || viewerPin === playerPin);
   
-  // Create a new room with unique room ID
+  // Create a new room with unique room ID - LOBBY state (no active connections)
   const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const room = {
     id: roomId,
     playerPin: playerPin,
     viewerPin: viewerPin,
+    state: 'lobby', // New state: lobby -> active -> ended
     creator: {
-      clientId: ws.id,
-      name: playerName
+      name: playerName,
+      connected: false
     },
-    joiner: null,
+    joiner: {
+      name: null,
+      connected: false
+    },
     viewers: [], // Array to store viewer connections
     originalCreatorName: playerName, // Track original creator
     originalJoinerName: null, // Track original joiner
@@ -162,14 +166,12 @@ function handleCreateRoom(ws, data) {
   gameRooms.set(roomId, room);
   pinToRoom.set(playerPin, room);
   pinToRoom.set(viewerPin, room);
-  ws.room = roomId;
-  ws.pinType = 'player';
   
-  console.log(`Room created: ${roomId} by ${playerName}`);
+  console.log(`Room lobby created: ${roomId} by ${playerName}`);
   console.log(`Player PIN: ${playerPin}, Viewer PIN: ${viewerPin}`);
   console.log(`Room data:`, JSON.stringify(room, null, 2));
   
-  // Send a response with both PINs
+  // Send a response with both PINs - then CLOSE this connection to save costs
   const responseData = {
     type: 'room_created',
     playerPin: playerPin,
@@ -189,6 +191,13 @@ function handleCreateRoom(ws, data) {
   try {
     ws.send(JSON.stringify(responseData));
     console.log('Room created response sent successfully');
+    
+    // Close the connection immediately to save costs - player will reconnect when game is ready
+    setTimeout(() => {
+      console.log('Closing room creation connection to save costs');
+      ws.close(1000, 'Room created successfully');
+    }, 1000);
+    
   } catch (error) {
     console.error('Error sending room_created response:', error);
   }
@@ -257,6 +266,46 @@ function handleJoinRoom(ws, data) {
     broadcastViewerUpdate(room);
     
   } else if (isPlayerPin) {
+    // Player PIN - check room state and handle accordingly
+    
+    if (room.state === 'lobby') {
+      // Room is in lobby state - this is the SECOND player joining!
+      console.log(`Second player ${playerName} joining lobby room - activating game!`);
+      
+      // Set joiner info
+      room.joiner.name = playerName;
+      room.joiner.connected = true;
+      room.originalJoinerName = playerName;
+      
+      // Activate the room
+      room.state = 'active';
+      room.lastActivity = Date.now();
+      
+      // This player stays connected
+      ws.room = room.id;
+      ws.isViewer = false;
+      ws.pinType = 'player';
+      
+      // Send response to joiner
+      const joinResponse = {
+        type: 'room_joined',
+        pin: pin,
+        playerPin: room.playerPin,
+        viewerPin: room.viewerPin,
+        creatorName: room.creator.name,
+        settings: room.settings,
+        isViewer: false,
+        viewerCount: room.viewers.length,
+        gameReady: true // Signal that both players are ready
+      };
+      
+      ws.send(JSON.stringify(joinResponse));
+      console.log('Joiner connected - game ready to start');
+      
+      // Now trigger the CREATOR to reconnect via a special endpoint or signal
+      // We'll implement this next
+      
+    } else if (room.state === 'active') {
     // Player PIN - try to add as player, or force as viewer if room is full
     
     if (room.joiner !== null) {
@@ -663,12 +712,35 @@ app.get('/health', (req, res) => {
   res.status(200).json(serverInfo);
 });
 
+// Check if game is ready to start (for creators to poll)
+app.get('/api/game-status/:playerPin', (req, res) => {
+  const { playerPin } = req.params;
+  
+  const room = pinToRoom.get(playerPin);
+  if (!room) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+  
+  const gameReady = room.state === 'active' && room.joiner.name;
+  
+  res.json({
+    gameReady,
+    state: room.state,
+    creatorName: room.creator.name,
+    joinerName: room.joiner.name,
+    playerPin: room.playerPin,
+    viewerPin: room.viewerPin,
+    settings: room.settings
+  });
+});
+
 // Get active rooms (for debug)
 app.get('/api/rooms', (req, res) => {
   const roomsInfo = Array.from(gameRooms.entries()).map(([roomId, room]) => ({
     roomId,
     playerPin: room.playerPin,
     viewerPin: room.viewerPin,
+    state: room.state,
     creatorName: room.creator.name,
     hasJoiner: !!room.joiner,
     joinerName: room.joiner?.name || null,
