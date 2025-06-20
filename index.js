@@ -231,39 +231,68 @@ function handleJoinRoom(ws, data) {
   
   // Handle joining based on PIN type
   if (isViewerPin) {
-    // Viewer PIN - always add as viewer regardless of room state
-    console.log(`Viewer PIN used, adding ${playerName} as viewer`);
+    // Viewer PIN - check if game is active before allowing connection
     
-    const viewer = {
-      clientId: ws.id,
-      name: playerName
-    };
-    
-    room.viewers.push(viewer);
-    ws.room = room.id;
-    ws.isViewer = true;
-    ws.pinType = 'viewer';
-    
-    console.log(`Player ${playerName} joined room as viewer via viewer PIN`);
-    
-    // Notify the viewer they joined as a viewer
-    const viewerResponse = {
-      type: 'room_joined',
-      pin: pin,
-      playerPin: room.playerPin,
-      viewerPin: room.viewerPin,
-      creatorName: room.creator.name,
-      joinerName: room.joiner?.name || null,
-      settings: room.settings,
-      isViewer: true,
-      viewerCount: room.viewers.length
-    };
-    
-    console.log('Sending viewer room_joined response:', JSON.stringify(viewerResponse));
-    ws.send(JSON.stringify(viewerResponse));
-    
-    // Notify all players and viewers about updated viewer count
-    broadcastViewerUpdate(room);
+    if (room.state === 'lobby') {
+      // Game not started yet - deny WebSocket connection and tell them to wait
+      console.log(`Viewer ${playerName} trying to join lobby room - sending wait response`);
+      
+      const waitResponse = {
+        type: 'viewer_wait',
+        message: 'Game not started yet - please wait for players to connect',
+        playerPin: room.playerPin,
+        viewerPin: room.viewerPin,
+        creatorName: room.creator.name,
+        settings: room.settings,
+        gameReady: false
+      };
+      
+      ws.send(JSON.stringify(waitResponse));
+      
+      // Close connection after sending response to save costs
+      setTimeout(() => {
+        console.log('Closing viewer connection - game not ready');
+        ws.close(1000, 'Game not started yet');
+      }, 1000);
+      
+      return;
+      
+    } else if (room.state === 'active') {
+      // Game is active - allow viewer to connect
+      console.log(`Viewer PIN used, adding ${playerName} as viewer to active game`);
+      
+      const viewer = {
+        clientId: ws.id,
+        name: playerName
+      };
+      
+      room.viewers.push(viewer);
+      ws.room = room.id;
+      ws.isViewer = true;
+      ws.pinType = 'viewer';
+      
+      console.log(`Player ${playerName} joined active room as viewer via viewer PIN`);
+      
+      // Notify the viewer they joined as a viewer
+      const viewerResponse = {
+        type: 'room_joined',
+        pin: pin,
+        playerPin: room.playerPin,
+        viewerPin: room.viewerPin,
+        creatorName: room.creator.name,
+        joinerName: room.joiner?.name || null,
+        settings: room.settings,
+        isViewer: true,
+        viewerCount: room.viewers.length,
+        gameActive: true
+      };
+      
+      console.log('Sending viewer room_joined response:', JSON.stringify(viewerResponse));
+      ws.send(JSON.stringify(viewerResponse));
+      
+      // Notify all players and viewers about updated viewer count
+      broadcastViewerUpdate(room);
+    }
     
   } else if (isPlayerPin) {
     // Player PIN - check room state and handle accordingly
@@ -306,12 +335,10 @@ function handleJoinRoom(ws, data) {
       // We'll implement this next
       
     } else if (room.state === 'active') {
-    // Player PIN - try to add as player, or force as viewer if room is full
-    
-    if (room.joiner !== null) {
-      // Room already has two players, but they used player PIN
-      console.log(`Room full but player PIN used, adding ${playerName} as viewer with explanation`);
+      // Room is already active - this might be a reconnection or additional player
+      console.log(`Room is active, handling additional player ${playerName}`);
       
+      // Add as viewer since game is already active
       const viewer = {
         clientId: ws.id,
         name: playerName
@@ -322,7 +349,6 @@ function handleJoinRoom(ws, data) {
       ws.isViewer = true;
       ws.pinType = 'player';
       
-      // Notify with explanation about room being full
       const viewerResponse = {
         type: 'room_joined',
         pin: pin,
@@ -333,96 +359,11 @@ function handleJoinRoom(ws, data) {
         settings: room.settings,
         isViewer: true,
         viewerCount: room.viewers.length,
-        message: 'Room is full - you have been added as a viewer'
+        message: 'Game already active - joined as viewer'
       };
       
       ws.send(JSON.stringify(viewerResponse));
       broadcastViewerUpdate(room);
-      
-    } else {
-      // Check if this is a returning original player or new joiner
-      const canJoinAsPlayer = !room.originalJoinerName || room.originalJoinerName === playerName;
-      
-      if (canJoinAsPlayer) {
-        // Add as the second player (joiner)
-        room.joiner = {
-          clientId: ws.id,
-          name: playerName
-        };
-        
-        // Set original joiner name if not set
-        if (!room.originalJoinerName) {
-          room.originalJoinerName = playerName;
-        }
-        
-        ws.room = room.id;
-        ws.isViewer = false;
-        ws.pinType = 'player';
-      
-        console.log(`Player ${playerName} joined room as joiner via player PIN`);
-        console.log(`Updated room data:`, JSON.stringify(room, null, 2));
-        
-        // Notify the joiner
-        const joinResponse = {
-          type: 'room_joined',
-          pin: pin,
-          playerPin: room.playerPin,
-          viewerPin: room.viewerPin,
-          creatorName: room.creator.name,
-          settings: room.settings,
-          isViewer: false,
-          viewerCount: room.viewers.length
-        };
-        
-        console.log('Sending room_joined response:', JSON.stringify(joinResponse));
-        ws.send(JSON.stringify(joinResponse));
-        
-        // Notify the creator that someone joined
-        const creatorWs = clients.get(room.creator.clientId);
-        if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-          const opponentJoinedMsg = {
-            type: 'opponent_joined',
-            name: playerName
-          };
-          console.log('Sending opponent_joined to creator:', JSON.stringify(opponentJoinedMsg));
-          creatorWs.send(JSON.stringify(opponentJoinedMsg));
-        } else {
-          console.log(`Creator websocket not available for room ${room.id}`);
-        }
-          
-        // Notify all viewers about the new joiner
-        broadcastViewerUpdate(room);
-      } else {
-        // Force as viewer - player slot reserved for original joiner
-        console.log(`Room joiner slot reserved for ${room.originalJoinerName}, adding ${playerName} as viewer`);
-        
-        const viewer = {
-          clientId: ws.id,
-          name: playerName
-        };
-        
-        room.viewers.push(viewer);
-        ws.room = room.id;
-        ws.isViewer = true;
-        ws.pinType = 'player';
-        
-        // Notify as viewer
-        const viewerResponse = {
-          type: 'room_joined',
-          pin: pin,
-          playerPin: room.playerPin,
-          viewerPin: room.viewerPin,
-          creatorName: room.creator.name,
-          joinerName: room.originalJoinerName,
-          settings: room.settings,
-          isViewer: true,
-          viewerCount: room.viewers.length,
-          message: `Player slot reserved for ${room.originalJoinerName}`
-        };
-        
-        ws.send(JSON.stringify(viewerResponse));
-        broadcastViewerUpdate(room);
-      }
     }
   }
 }
@@ -434,14 +375,16 @@ function broadcastViewerUpdate(room) {
     viewerCount: room.viewers.length
   };
   
-  // Send to creator
-  const creatorWs = clients.get(room.creator.clientId);
-  if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-    creatorWs.send(JSON.stringify(viewerUpdateMsg));
+  // Send to creator if connected
+  if (room.creator.clientId) {
+    const creatorWs = clients.get(room.creator.clientId);
+    if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
+      creatorWs.send(JSON.stringify(viewerUpdateMsg));
+    }
   }
   
-  // Send to joiner if exists
-  if (room.joiner) {
+  // Send to joiner if exists and connected
+  if (room.joiner && room.joiner.clientId) {
     const joinerWs = clients.get(room.joiner.clientId);
     if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
       joinerWs.send(JSON.stringify(viewerUpdateMsg));
@@ -560,7 +503,7 @@ function handleLeaveRoom(ws) {
     // Creator left
     console.log(`Creator left room ${roomId}`);
     
-    if (room.joiner) {
+    if (room.joiner && room.joiner.clientId) {
       const joinerWs = clients.get(room.joiner.clientId);
       if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
         joinerWs.send(JSON.stringify({
@@ -582,9 +525,12 @@ function handleLeaveRoom(ws) {
     });
     
     // If there's a joiner, promote them to creator and keep room alive
-    if (room.joiner) {
+    if (room.joiner && room.joiner.clientId) {
       room.creator = room.joiner;
-      room.joiner = null;
+      room.joiner = {
+        name: null,
+        connected: false
+      };
       console.log(`Promoted joiner to creator in room ${roomId}`);
     } else {
       // No joiner, delete the room and PIN mappings only if no viewers
@@ -600,12 +546,14 @@ function handleLeaveRoom(ws) {
     // Joiner left
     console.log(`Joiner left room ${roomId}`);
     
-    const creatorWs = clients.get(room.creator.clientId);
-    if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-      creatorWs.send(JSON.stringify({
-        type: 'opponent_left',
-        name: room.joiner.name
-      }));
+    if (room.creator.clientId) {
+      const creatorWs = clients.get(room.creator.clientId);
+      if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
+        creatorWs.send(JSON.stringify({
+          type: 'opponent_left',
+          name: room.joiner.name
+        }));
+      }
     }
     
     // Notify all viewers that joiner left
@@ -620,7 +568,10 @@ function handleLeaveRoom(ws) {
     });
     
     // Reset joiner slot
-    room.joiner = null;
+    room.joiner = {
+      name: null,
+      connected: false
+    };
   }
   
   ws.room = null;
@@ -712,16 +663,18 @@ app.get('/health', (req, res) => {
   res.status(200).json(serverInfo);
 });
 
-// Check if game is ready to start (for creators to poll)
-app.get('/api/game-status/:playerPin', (req, res) => {
-  const { playerPin } = req.params;
+// Check if game is ready to start (for creators and viewers to poll)
+app.get('/api/game-status/:pin', (req, res) => {
+  const { pin } = req.params;
   
-  const room = pinToRoom.get(playerPin);
+  const room = pinToRoom.get(pin);
   if (!room) {
     return res.status(404).json({ error: 'Room not found' });
   }
   
   const gameReady = room.state === 'active' && room.joiner.name;
+  const isPlayerPin = pin === room.playerPin;
+  const isViewerPin = pin === room.viewerPin;
   
   res.json({
     gameReady,
@@ -730,7 +683,9 @@ app.get('/api/game-status/:playerPin', (req, res) => {
     joinerName: room.joiner.name,
     playerPin: room.playerPin,
     viewerPin: room.viewerPin,
-    settings: room.settings
+    settings: room.settings,
+    pinType: isPlayerPin ? 'player' : (isViewerPin ? 'viewer' : 'unknown'),
+    allowConnection: gameReady || isPlayerPin // Players can connect to lobby, viewers need active game
   });
 });
 
