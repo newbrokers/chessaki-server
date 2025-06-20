@@ -590,78 +590,26 @@ function handleLeaveRoom(ws) {
     broadcastViewerUpdate(room);
     
   } else if (room.creator.clientId === ws.id) {
-    // Creator left
-    console.log(`Creator left room ${roomId}`);
+    // Creator disconnected (likely temporary due to Railway timeout)
+    console.log(`Creator temporarily disconnected from room ${roomId}`);
     
-    if (room.joiner && room.joiner.clientId) {
-      const joinerWs = clients.get(room.joiner.clientId);
-      if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
-        joinerWs.send(JSON.stringify({
-          type: 'opponent_left',
-          name: room.creator.name
-        }));
-      }
-    }
+    // Mark creator as disconnected but preserve their slot
+    room.creator.connected = false;
+    room.creator.clientId = null;
     
-    // Notify all viewers that creator left
-    room.viewers.forEach(viewer => {
-      const viewerWs = clients.get(viewer.clientId);
-      if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
-        viewerWs.send(JSON.stringify({
-          type: 'opponent_left',
-          name: room.creator.name
-        }));
-      }
-    });
-    
-    // If there's a joiner, promote them to creator and keep room alive
-    if (room.joiner && room.joiner.clientId) {
-      room.creator = room.joiner;
-      room.joiner = {
-        name: null,
-        connected: false
-      };
-      console.log(`Promoted joiner to creator in room ${roomId}`);
-    } else {
-      // No joiner, delete the room and PIN mappings only if no viewers
-      if (room.viewers.length === 0) {
-        pinToRoom.delete(room.playerPin);
-        pinToRoom.delete(room.viewerPin);
-        gameRooms.delete(roomId);
-        console.log(`Deleted empty room ${roomId}`);
-      }
-    }
+    // Don't send opponent_left immediately - this might be a temporary disconnect
+    console.log(`Creator slot preserved for reconnection in room ${roomId}`);
     
   } else if (room.joiner && room.joiner.clientId === ws.id) {
-    // Joiner left
-    console.log(`Joiner left room ${roomId}`);
+    // Joiner disconnected (likely temporary due to Railway timeout)
+    console.log(`Joiner temporarily disconnected from room ${roomId}`);
     
-    if (room.creator.clientId) {
-      const creatorWs = clients.get(room.creator.clientId);
-      if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-        creatorWs.send(JSON.stringify({
-          type: 'opponent_left',
-          name: room.joiner.name
-        }));
-      }
-    }
+    // Mark joiner as disconnected but preserve their slot
+    room.joiner.connected = false;
+    room.joiner.clientId = null;
     
-    // Notify all viewers that joiner left
-    room.viewers.forEach(viewer => {
-      const viewerWs = clients.get(viewer.clientId);
-      if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
-        viewerWs.send(JSON.stringify({
-          type: 'opponent_left',
-          name: room.joiner.name
-        }));
-      }
-    });
-    
-    // Reset joiner slot
-    room.joiner = {
-      name: null,
-      connected: false
-    };
+    // Don't send opponent_left immediately - this might be a temporary disconnect
+    console.log(`Joiner slot preserved for reconnection in room ${roomId}`);
   }
   
   ws.room = null;
