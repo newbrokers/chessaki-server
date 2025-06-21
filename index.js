@@ -159,6 +159,12 @@ function handleCreateRoom(ws, data) {
       totalGames,
       countdown
     },
+    gameState: {
+      fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", // Starting position
+      moves: [], // Array of moves in UCI format
+      turn: "w", // Current turn
+      status: "waiting" // waiting, playing, ended
+    },
     messages: []
   };
   
@@ -450,7 +456,8 @@ function broadcastGameStart(room) {
     playerPin: room.playerPin,
     viewerPin: room.viewerPin,
     viewerCount: room.viewers.length,
-    timestamp: Date.now() // Add synchronized timestamp
+    timestamp: Date.now(), // Add synchronized timestamp
+    gameState: room.gameState // Include current game state for sync
   };
   
   console.log('Game start message:', JSON.stringify(gameStartMsg));
@@ -525,6 +532,13 @@ function handleGameMessage(ws, data) {
   
   // Update room activity timestamp
   room.lastActivity = Date.now();
+  
+  // Track moves in room game state
+  if (message.type === 'move') {
+    room.gameState.moves.push(message.uci);
+    room.gameState.turn = room.gameState.turn === 'w' ? 'b' : 'w';
+    console.log(`Move tracked: ${message.uci}, moves: ${room.gameState.moves.length}, turn: ${room.gameState.turn}`);
+  }
   
   // Determine the recipient
   let recipientId;
