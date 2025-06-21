@@ -83,6 +83,10 @@ wss.on('connection', (ws, req) => {
           }));
           break;
           
+        case 'recreate_room':
+          handleRecreateRoom(ws, data);
+          break;
+          
         default:
           console.log(`Unknown message type: ${data.type}`);
       }
@@ -110,6 +114,47 @@ wss.on('connection', (ws, req) => {
     clientId
   }));
 });
+
+// Recreate a room with the same PIN for rematch
+function handleRecreateRoom(ws, data) {
+  const { pin, playerName, timeControl, totalGames, countdown } = data;
+  
+  console.log(`Recreating room with PIN: ${pin} for rematch`);
+  
+  // Delete existing room if it exists
+  if (gameRooms.has(pin)) {
+    console.log(`Deleting existing room ${pin} for recreation`);
+    gameRooms.delete(pin);
+  }
+  
+  // Create fresh room with same PIN
+  const room = {
+    id: pin,
+    creator: {
+      clientId: ws.id,
+      name: playerName
+    },
+    joiner: null,
+    settings: {
+      timeControl,
+      totalGames,
+      countdown
+    },
+    messages: [],
+    lastActivity: Date.now()
+  };
+  
+  gameRooms.set(pin, room);
+  ws.room = pin;
+  
+  console.log(`Room recreated: ${pin} by ${playerName} for rematch`);
+  
+  ws.send(JSON.stringify({
+    type: 'room_recreated',
+    pin,
+    settings: room.settings
+  }));
+}
 
 // Generate a random PIN
 function generatePin() {
@@ -376,6 +421,36 @@ function handleJoinRoom(ws, data) {
         // Broadcast game start to synchronize both players
         broadcastGameStart(room);
         
+      } else if (playerName === room.joiner.name && !room.joiner.clientId) {
+        // This is the joiner reconnecting
+        console.log(`Joiner ${playerName} reconnecting to active room`);
+        
+        room.joiner.clientId = ws.id;
+        room.joiner.connected = true;
+        ws.room = room.id;
+        ws.isViewer = false;
+        ws.pinType = 'player';
+        
+        const joinerResponse = {
+          type: 'room_joined',
+          pin: pin,
+          playerPin: room.playerPin,
+          viewerPin: room.viewerPin,
+          creatorName: room.creator.name,
+          joinerName: room.joiner.name,
+          settings: room.settings,
+          isViewer: false,
+          viewerCount: room.viewers.length,
+          gameActive: true,
+          gameReady: true
+        };
+        
+        ws.send(JSON.stringify(joinerResponse));
+        console.log('Joiner reconnected successfully');
+        
+        // Broadcast game start to synchronize both players
+        broadcastGameStart(room);
+        
       } else {
         // Room is already active - add as viewer
         console.log(`Room is active, adding ${playerName} as viewer`);
@@ -630,12 +705,8 @@ function handleLeaveRoom(ws) {
   ws.isViewer = false;
 }
 
-// Check for dead connections and inactive rooms every 30 seconds
-const interval = setInterval(() => {
-  const now = Date.now();
-  const INACTIVE_TIMEOUT = 5 * 60 * 1000; // 5 minutes of inactivity - give more time for players to join
-  
-  // Check for dead connections
+// Ping connections every 15 seconds for cost optimization
+const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
       handleLeaveRoom(ws);
@@ -645,6 +716,12 @@ const interval = setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   });
+}, 15000);
+
+// Check for inactive rooms every 30 seconds
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  const INACTIVE_TIMEOUT = 5 * 60 * 1000; // 5 minutes of inactivity - give more time for players to join
   
   // Check for inactive rooms to close
   for (const [pin, room] of gameRooms.entries()) {
@@ -696,9 +773,10 @@ const interval = setInterval(() => {
   console.log(`Active rooms: ${gameRooms.size}, Active connections: ${clients.size}`);
 }, 30000);
 
-// Clean up interval on server close
+// Clean up intervals on server close
 wss.on('close', () => {
-  clearInterval(interval);
+  clearInterval(pingInterval);
+  clearInterval(cleanupInterval);
 });
 
 // Health check endpoint
