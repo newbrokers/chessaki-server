@@ -418,8 +418,13 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
         
-        // Broadcast game start to synchronize both players
-        broadcastGameStart(room);
+        // Only broadcast game start if both players are connected
+        if (room.creator.clientId && room.joiner.clientId) {
+          console.log('Both players connected - broadcasting game start');
+          broadcastGameStart(room);
+        } else {
+          console.log('Waiting for other player to reconnect before starting game');
+        }
         
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
         // This is the joiner reconnecting
@@ -448,8 +453,13 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse));
         console.log('Joiner reconnected successfully');
         
-        // Broadcast game start to synchronize both players
-        broadcastGameStart(room);
+        // Only broadcast game start if both players are connected
+        if (room.creator.clientId && room.joiner.clientId) {
+          console.log('Both players connected - broadcasting game start');
+          broadcastGameStart(room);
+        } else {
+          console.log('Waiting for other player to reconnect before starting game');
+        }
         
       } else {
         // Room is already active - add as viewer
