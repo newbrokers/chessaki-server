@@ -625,6 +625,18 @@ function handleGameMessage(ws, data) {
     console.log(`Move tracked: ${message.uci}, moves: ${room.gameState.moves.length}, turn: ${room.gameState.turn}`);
   }
   
+  // Reset game state on resignation, game end, draw accept, or rematch acceptance for fresh game
+  if (message.type === 'resign' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-accept') {
+    console.log(`${message.type} detected - preparing for fresh game state`);
+    room.gameState = {
+      fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      moves: [],
+      turn: "w",
+      status: "waiting"
+    };
+    console.log('Game state reset for fresh game');
+  }
+  
   // Determine the recipient
   let recipientId;
   if (ws.id === room.creator.clientId) {
@@ -645,7 +657,7 @@ function handleGameMessage(ws, data) {
   }
   
   // Also send game messages to all viewers so they can watch the game
-  if (message.type === 'move' || message.type === 'resign' || message.type === 'rematch-offer' || message.type === 'rematch-accept') {
+  if (message.type === 'move' || message.type === 'resign' || message.type === 'rematch-offer' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-offer' || message.type === 'draw-accept') {
     room.viewers.forEach(viewer => {
       const viewerWs = clients.get(viewer.clientId);
       if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
