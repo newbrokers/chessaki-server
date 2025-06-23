@@ -624,6 +624,96 @@ function handleGameMessage(ws, data) {
     room.gameState.turn = room.gameState.turn === 'w' ? 'b' : 'w';
     console.log(`Move tracked: ${message.uci}, moves: ${room.gameState.moves.length}, turn: ${room.gameState.turn}`);
   }
+
+  // Handle timer synchronization on reconnection
+  if (message.type === 'sync_request') {
+    console.log(`Timer sync request received from ${ws.id}`);
+    
+    // Forward the sync request to the other player with timer logging
+    let recipientId;
+    if (ws.id === room.creator.clientId) {
+      recipientId = room.joiner?.clientId;
+    } else if (room.joiner && ws.id === room.joiner.clientId) {
+      recipientId = room.creator.clientId;
+    }
+    
+    if (recipientId) {
+      const recipientWs = clients.get(recipientId);
+      if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+        console.log(`Forwarding sync_request to connected player ${recipientId}`);
+        recipientWs.send(JSON.stringify({
+          type: 'game_message',
+          message
+        }));
+      }
+    }
+    return; // Don't process sync_request further in regular message flow
+  }
+
+  // Handle timer sync with authoritative timer selection
+  if (message.type === 'timer_sync') {
+    console.log(`Timer sync received:`, message);
+    
+    // Store the timer values in room for comparison
+    if (!room.timerSync) {
+      room.timerSync = {
+        timers: [],
+        count: 0
+      };
+    }
+    
+    room.timerSync.timers.push({
+      clientId: ws.id,
+      whiteMs: message.whiteMs,
+      blackMs: message.blackMs,
+      timestamp: Date.now()
+    });
+    room.timerSync.count++;
+    
+    // If we have timers from both players, choose the authoritative values
+    if (room.timerSync.count >= 2) {
+      const timer1 = room.timerSync.timers[0];
+      const timer2 = room.timerSync.timers[1];
+      
+      // Choose the lowest (most progressed) timer for each color
+      const authoritativeWhiteMs = Math.min(timer1.whiteMs, timer2.whiteMs);
+      const authoritativeBlackMs = Math.min(timer1.blackMs, timer2.blackMs);
+      
+      console.log(`Timer synchronization:
+        Player 1 (${timer1.clientId}): white=${timer1.whiteMs}, black=${timer1.blackMs}
+        Player 2 (${timer2.clientId}): white=${timer2.whiteMs}, black=${timer2.blackMs}
+        Authoritative: white=${authoritativeWhiteMs}, black=${authoritativeBlackMs}`);
+      
+      // Send authoritative timer sync to both players
+      const authoritativeSync = {
+        type: 'timer_sync',
+        whiteMs: authoritativeWhiteMs,
+        blackMs: authoritativeBlackMs,
+        status: message.status,
+        gameNo: message.gameNo,
+        fen: message.fen
+      };
+      
+      // Send to both players
+      [room.creator.clientId, room.joiner?.clientId].forEach(clientId => {
+        if (clientId) {
+          const playerWs = clients.get(clientId);
+          if (playerWs && playerWs.readyState === WebSocket.OPEN) {
+            playerWs.send(JSON.stringify({
+              type: 'game_message',
+              message: authoritativeSync
+            }));
+          }
+        }
+      });
+      
+      // Clear the timer sync state
+      room.timerSync = null;
+      return; // Don't process timer_sync further in regular message flow
+    }
+    
+    // If we only have one timer so far, continue normal processing
+  }
   
   // Reset game state on resignation, game end, draw accept, or rematch acceptance for fresh game
   if (message.type === 'resign' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-accept') {
