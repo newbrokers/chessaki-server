@@ -421,9 +421,17 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
         
-        // Request timer sync from joiner for the reconnecting creator
+        // Only broadcast game start if both players are connected
         if (room.creator.clientId && room.joiner.clientId) {
-          requestTimerSyncFromPlayer(room, room.joiner.clientId, 'creator reconnected');
+          console.log('Both players connected - broadcasting game start');
+          broadcastGameStart(room);
+          
+          // Request timer sync from joiner for the reconnecting creator
+          if (room.joiner.clientId) {
+            requestTimerSyncFromPlayer(room, room.joiner.clientId, 'creator reconnected');
+          }
+        } else {
+          console.log('Waiting for other player to reconnect before starting game');
         }
         
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
@@ -453,9 +461,17 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse));
         console.log('Joiner reconnected successfully');
         
-        // Request timer sync from creator for the reconnecting joiner
+        // Only broadcast game start if both players are connected
         if (room.creator.clientId && room.joiner.clientId) {
-          requestTimerSyncFromPlayer(room, room.creator.clientId, 'joiner reconnected');
+          console.log('Both players connected - broadcasting game start');
+          broadcastGameStart(room);
+          
+          // Request timer sync from creator for the reconnecting joiner
+          if (room.creator.clientId) {
+            requestTimerSyncFromPlayer(room, room.creator.clientId, 'joiner reconnected');
+          }
+        } else {
+          console.log('Waiting for other player to reconnect before starting game');
         }
         
       } else {
