@@ -420,8 +420,13 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
         
-        // no broadcast here – opponent is already playing
-        console.log('Creator reconnected - no game_start needed (already active)');
+        // Check if this is the first time both players are connected (first real game start)
+        if (room.creator.clientId && room.joiner.clientId && !room.gameStarted) {
+          console.log('Both players connected for first time - broadcasting game start');
+          broadcastGameStart(room);
+        } else {
+          console.log('Creator reconnected - no game_start needed (already active)');
+        }
         
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
         // This is the joiner reconnecting
@@ -450,8 +455,13 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse));
         console.log('Joiner reconnected successfully');
         
-        // no broadcast here – opponent is already playing
-        console.log('Joiner reconnected - no game_start needed (already active)');
+        // Check if this is the first time both players are connected (first real game start)
+        if (room.creator.clientId && room.joiner.clientId && !room.gameStarted) {
+          console.log('Both players connected for first time - broadcasting game start');
+          broadcastGameStart(room);
+        } else {
+          console.log('Joiner reconnected - no game_start needed (already active)');
+        }
         
       } else {
         // Room is already active - add as viewer
