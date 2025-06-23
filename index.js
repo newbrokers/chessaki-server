@@ -700,7 +700,7 @@ function handleGameMessage(ws, data) {
   }
   
   // Also send game messages to all viewers so they can watch the game
-  if (message.type === 'move' || message.type === 'resign' || message.type === 'rematch-offer' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-offer' || message.type === 'draw-accept' || message.type === 'timer_sync') {
+  if (message.type === 'move' || message.type === 'resign' || message.type === 'rematch-offer' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-offer' || message.type === 'draw-accept' || message.type === 'timer_sync' || message.type === 'connection_status') {
     room.viewers.forEach(viewer => {
       const viewerWs = clients.get(viewer.clientId);
       if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
