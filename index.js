@@ -420,12 +420,12 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
         
-        // Check if this is the first time both players are connected (first real game start)
-        if (room.creator.clientId && room.joiner.clientId && !room.gameStarted) {
-          console.log('Both players connected for first time - broadcasting game start');
+        // Only broadcast game start if both players are connected
+        if (room.creator.clientId && room.joiner.clientId) {
+          console.log('Both players connected - broadcasting game start');
           broadcastGameStart(room);
         } else {
-          console.log('Creator reconnected - no game_start needed (already active)');
+          console.log('Waiting for other player to reconnect before starting game');
         }
         
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
@@ -455,12 +455,12 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse));
         console.log('Joiner reconnected successfully');
         
-        // Check if this is the first time both players are connected (first real game start)
-        if (room.creator.clientId && room.joiner.clientId && !room.gameStarted) {
-          console.log('Both players connected for first time - broadcasting game start');
+        // Only broadcast game start if both players are connected
+        if (room.creator.clientId && room.joiner.clientId) {
+          console.log('Both players connected - broadcasting game start');
           broadcastGameStart(room);
         } else {
-          console.log('Joiner reconnected - no game_start needed (already active)');
+          console.log('Waiting for other player to reconnect before starting game');
         }
         
       } else {
@@ -533,9 +533,12 @@ function broadcastViewerUpdate(room) {
 
 // Broadcast game start to synchronize both players
 function broadcastGameStart(room) {
-  if (room.gameStarted) return;      // already sent once
+  if (room.gameStarted) {
+    console.log('Game already started - skipping game_start to prevent timer reset');
+    return;      // already sent once
+  }
   room.gameStarted = true;
-  console.log('Broadcasting FIRST game_start.');
+  console.log('Broadcasting FIRST game_start with countdown...');
   
   const gameStartMsg = {
     type: 'game_start',
