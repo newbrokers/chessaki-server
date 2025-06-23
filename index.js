@@ -140,6 +140,7 @@ function handleRecreateRoom(ws, data) {
       totalGames,
       countdown
     },
+    gameStarted: false, // 👈 ADD THIS FLAG  
     messages: [],
     lastActivity: Date.now()
   };
@@ -210,6 +211,7 @@ function handleCreateRoom(ws, data) {
       turn: "w", // Current turn
       status: "waiting" // waiting, playing, ended
     },
+    gameStarted: false, // 👈 ADD THIS FLAG
     messages: []
   };
   
@@ -418,13 +420,8 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
         
-        // Only broadcast game start if both players are connected
-        if (room.creator.clientId && room.joiner.clientId) {
-          console.log('Both players connected - broadcasting game start');
-          broadcastGameStart(room);
-        } else {
-          console.log('Waiting for other player to reconnect before starting game');
-        }
+        // no broadcast here – opponent is already playing
+        console.log('Creator reconnected - no game_start needed (already active)');
         
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
         // This is the joiner reconnecting
@@ -453,13 +450,8 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse));
         console.log('Joiner reconnected successfully');
         
-        // Only broadcast game start if both players are connected
-        if (room.creator.clientId && room.joiner.clientId) {
-          console.log('Both players connected - broadcasting game start');
-          broadcastGameStart(room);
-        } else {
-          console.log('Waiting for other player to reconnect before starting game');
-        }
+        // no broadcast here – opponent is already playing
+        console.log('Joiner reconnected - no game_start needed (already active)');
         
       } else {
         // Room is already active - add as viewer
@@ -473,7 +465,7 @@ function handleJoinRoom(ws, data) {
         room.viewers.push(viewer);
         ws.room = room.id;
         ws.isViewer = true;
-        ws.pinType = 'player';
+        ws.pinType = 'viewer';
         
         const viewerResponse = {
           type: 'room_joined',
@@ -531,7 +523,9 @@ function broadcastViewerUpdate(room) {
 
 // Broadcast game start to synchronize both players
 function broadcastGameStart(room) {
-  console.log('Broadcasting game start to both players...');
+  if (room.gameStarted) return;      // already sent once
+  room.gameStarted = true;
+  console.log('Broadcasting FIRST game_start.');
   
   const gameStartMsg = {
     type: 'game_start',
@@ -634,6 +628,7 @@ function handleGameMessage(ws, data) {
       turn: "w",
       status: "waiting"
     };
+    room.gameStarted = false; // 👈 Reset flag for new game
     console.log('Game state reset for fresh game');
   }
   
@@ -657,7 +652,7 @@ function handleGameMessage(ws, data) {
   }
   
   // Also send game messages to all viewers so they can watch the game
-  if (message.type === 'move' || message.type === 'resign' || message.type === 'rematch-offer' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-offer' || message.type === 'draw-accept') {
+  if (message.type === 'move' || message.type === 'resign' || message.type === 'rematch-offer' || message.type === 'rematch-accept' || message.type === 'game_end' || message.type === 'draw-offer' || message.type === 'draw-accept' || message.type === 'timer_sync') {
     room.viewers.forEach(viewer => {
       const viewerWs = clients.get(viewer.clientId);
       if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
