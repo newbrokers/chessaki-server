@@ -421,12 +421,9 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse));
         console.log('Creator reconnected successfully');
         
-        // Only broadcast game start if both players are connected
+        // Request timer sync from joiner for the reconnecting creator
         if (room.creator.clientId && room.joiner.clientId) {
-          console.log('Both players connected - broadcasting game start');
-          broadcastGameStart(room);
-        } else {
-          console.log('Waiting for other player to reconnect before starting game');
+          requestTimerSyncFromPlayer(room, room.joiner.clientId, 'creator reconnected');
         }
         
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
@@ -456,12 +453,9 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse));
         console.log('Joiner reconnected successfully');
         
-        // Only broadcast game start if both players are connected
+        // Request timer sync from creator for the reconnecting joiner
         if (room.creator.clientId && room.joiner.clientId) {
-          console.log('Both players connected - broadcasting game start');
-          broadcastGameStart(room);
-        } else {
-          console.log('Waiting for other player to reconnect before starting game');
+          requestTimerSyncFromPlayer(room, room.creator.clientId, 'joiner reconnected');
         }
         
       } else {
@@ -538,6 +532,9 @@ function broadcastViewerUpdate(room) {
 
 // Broadcast game start to synchronize both players
 function broadcastGameStart(room) {
+  if (room.gameStarted) return;      // already sent once
+  room.gameStarted = true;           // mark as done
+  
   console.log('Broadcasting game start to both players...');
   
   const gameStartMsg = {
@@ -602,6 +599,18 @@ function requestTimerSyncForViewer(room, viewerWs) {
         message: { type: 'sync_request' }
       }));
     }
+  }
+}
+
+// Request timer sync from connected player for reconnecting player
+function requestTimerSyncFromPlayer(room, fromClientId, reason) {
+  const fromWs = clients.get(fromClientId);
+  if (fromWs && fromWs.readyState === WebSocket.OPEN) {
+    console.log(`Requesting timer sync from connected player: ${reason}`);
+    fromWs.send(JSON.stringify({
+      type: 'game_message',
+      message: { type: 'sync_request' }
+    }));
   }
 }
 
