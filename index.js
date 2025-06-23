@@ -140,7 +140,6 @@ function handleRecreateRoom(ws, data) {
       totalGames,
       countdown
     },
-    gameStarted: false, // 👈 ADD THIS FLAG  
     messages: [],
     lastActivity: Date.now()
   };
@@ -211,7 +210,6 @@ function handleCreateRoom(ws, data) {
       turn: "w", // Current turn
       status: "waiting" // waiting, playing, ended
     },
-    gameStarted: false, // 👈 ADD THIS FLAG
     messages: []
   };
   
@@ -475,7 +473,7 @@ function handleJoinRoom(ws, data) {
         room.viewers.push(viewer);
         ws.room = room.id;
         ws.isViewer = true;
-        ws.pinType = 'viewer';
+        ws.pinType = 'player';
         
         const viewerResponse = {
           type: 'room_joined',
@@ -533,12 +531,7 @@ function broadcastViewerUpdate(room) {
 
 // Broadcast game start to synchronize both players
 function broadcastGameStart(room) {
-  if (room.gameStarted) {
-    console.log('Game already started - skipping game_start to prevent timer reset');
-    return;      // already sent once
-  }
-  room.gameStarted = true;
-  console.log('Broadcasting FIRST game_start with countdown...');
+  console.log('Broadcasting game start to both players...');
   
   const gameStartMsg = {
     type: 'game_start',
@@ -641,7 +634,6 @@ function handleGameMessage(ws, data) {
       turn: "w",
       status: "waiting"
     };
-    room.gameStarted = false; // 👈 Reset flag for new game
     console.log('Game state reset for fresh game');
   }
   
