@@ -532,9 +532,6 @@ function broadcastViewerUpdate(room) {
 
 // Broadcast game start to synchronize both players
 function broadcastGameStart(room) {
-  if (room.gameStarted) return;      // already sent once
-  room.gameStarted = true;           // mark as done
-  
   console.log('Broadcasting game start to both players...');
   
   const gameStartMsg = {
