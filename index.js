@@ -388,20 +388,19 @@ function handleJoinRoom(ws, data) {
         settings: room.settings, // Include all game settings from creator
         isViewer: false,
         viewerCount: room.viewers.length,
-        gameReady: true,
-        gameActive: true, // Signal that both players are ready
+        gameReady: true, // Game is ready for creator to join
+        gameActive: false, // Game is not yet started
       }
 
       ws.send(JSON.stringify(joinResponse))
-      console.log("Joiner connected - game ready to start")
+      console.log("Joiner connected - waiting for creator to start the game.")
 
-      // Broadcast game start to all connected clients in the room
-      broadcastGameStart(room)
+      // DO NOT broadcast game start here. Wait for creator to connect.
     } else if (room.state === "active") {
-      // Room is already active - check if this is the creator reconnecting
+      // Room is already active - check if this is a player reconnecting
 
       if (playerName === room.creator.name && !room.creator.clientId) {
-        // This is the creator reconnecting
+        // This is the creator connecting (for the first time to the active game, or reconnecting)
         console.log(`Creator ${playerName} reconnecting to active room`)
 
         room.creator.clientId = ws.id
@@ -427,17 +426,12 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(creatorResponse))
         console.log("Creator reconnected successfully")
 
-        // Only broadcast game start if both players are connected
+        // Only broadcast game start if both players are now connected
         if (room.creator.clientId && room.joiner.clientId) {
-          console.log("Both players connected - broadcasting game start")
+          console.log("Both players are now connected - broadcasting game start.")
           broadcastGameStart(room)
-
-          // Request timer sync from joiner for the reconnecting creator
-          if (room.joiner.clientId) {
-            requestTimerSyncFromPlayer(room, room.joiner.clientId, "creator reconnected")
-          }
         } else {
-          console.log("Waiting for other player to reconnect before starting game")
+          console.log("Creator connected, but joiner is missing. Waiting for joiner to reconnect.")
         }
       } else if (playerName === room.joiner.name && !room.joiner.clientId) {
         // This is the joiner reconnecting
@@ -466,9 +460,9 @@ function handleJoinRoom(ws, data) {
         ws.send(JSON.stringify(joinerResponse))
         console.log("Joiner reconnected successfully")
 
-        // Only broadcast game start if both players are connected
+        // If creator is already here, we can start the game (or resync)
         if (room.creator.clientId && room.joiner.clientId) {
-          console.log("Both players connected - broadcasting game start")
+          console.log("Both players connected after joiner reconnect - broadcasting game start")
           broadcastGameStart(room)
 
           // Request timer sync from creator for the reconnecting joiner
@@ -476,7 +470,7 @@ function handleJoinRoom(ws, data) {
             requestTimerSyncFromPlayer(room, room.creator.clientId, "joiner reconnected")
           }
         } else {
-          console.log("Waiting for other player to reconnect before starting game")
+          console.log("Joiner reconnected, but creator is missing. Waiting for creator to reconnect.")
         }
       } else {
         // Room is already active - add as viewer
@@ -682,7 +676,7 @@ function handleGameMessage(ws, data) {
     console.log(`Move tracked: ${message.uci}, moves: ${room.gameState.moves.length}, turn: ${room.gameState.turn}`)
   }
 
-  // Reset game state on resignation, game end, draw accept, or rematch acceptance for fresh game
+  // Reset game state on resignation, game end, or draw accept for fresh game
   if (message.type === "resign" || message.type === "game_end" || message.type === "draw-accept") {
     console.log(`${message.type} detected - preparing for fresh game state`)
     room.gameState = {
@@ -694,7 +688,7 @@ function handleGameMessage(ws, data) {
     console.log("Game state reset for fresh game")
   }
 
-  // NEW: If rematch accepted, reset game state and broadcast game_start
+  // If rematch accepted, reset game state and broadcast game_start
   if (message.type === "rematch-accept") {
     console.log("Rematch accepted - resetting game state and broadcasting game start")
     room.gameState = {
