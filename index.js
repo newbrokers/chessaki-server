@@ -1,171 +1,81 @@
-const express = require("express")
-const http = require("http")
-const WebSocket = require("ws")
-const cors = require("cors")
-const { randomUUID } = require("crypto")
-require("dotenv").config()
+"use client"
 
-const app = express()
-const port = process.env.PORT || 8080
+import type React from "react"
 
-// Enable CORS for all routes
-app.use(
-  cors({
-    origin: "*", // Allow all origins for now
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-)
-app.use(express.json())
+/* ------------------------------------------------------------------ *\
+CHESS – connecting peer-to-peer using WebRTC with WebSocket signaling and fallback
+\* ------------------------------------------------------------------ */
 
-// Create HTTP server
-const server = http.createServer(app)
+import { useState, useEffect, useRef, useCallback } from "react"
+import { Chess } from "chess.js"
+import { useSound } from "@/components/sound-provider" // Import the useSound hook
+import { useWebRTCGame } from "./connection-hooks"
+import { cloneWithHistory } from "@/utils/chess-utils" // Import cloneWithHistory function
+import { startFreshGame } from "@/utils/game-utils" // Import startFreshGame function
 
-// Create WebSocket server
-const wss = new WebSocket.Server({ server })
+// Add import for useRouter
+import { useRouter } from "next/navigation"
 
-// Game rooms for matchmaking - now indexed by both player and viewer PINs
-const gameRooms = new Map()
-// PIN mapping - maps PINs to room objects
-const pinToRoom = new Map()
-// Active connections
-const clients = new Map()
+/* ---------- ✱ NEW – time-control presets ------------------------- */
+const TIME_CONTROLS = {
+  // Classical
+  c90: { label: "Classical 90 + 30", base: 90 * 60 * 1000, inc: 30 * 1000 },
+  c60: { label: "Classical 60 + 0", base: 60 * 60 * 1000, inc: 0 },
+  c30: { label: "Classical 30 + 20", base: 30 * 60 * 1000, inc: 20 * 1000 },
 
-// Heartbeat to keep connections alive
-function heartbeat() {
-  this.isAlive = true
-}
+  // Rapid
+  r25: { label: "Rapid 25 + 10", base: 25 * 60 * 1000, inc: 10 * 1000 },
+  r15: { label: "Rapid 15 + 10", base: 15 * 60 * 1000, inc: 10 * 1000 },
+  r10: { label: "Rapid 10 + 0", base: 10 * 60 * 1000, inc: 0 },
+  r10i: { label: "Rapid 10 + 5", base: 10 * 60 * 1000, inc: 5 * 1000 },
 
-// Handle WebSocket connections
-wss.on("connection", (ws, req) => {
-  const clientId = randomUUID()
+  // Blitz
+  b05: { label: "Blitz 5 + 3", base: 5 * 60 * 1000, inc: 3 * 1000 },
+  b03: { label: "Blitz 3 + 2", base: 3 * 60 * 1000, inc: 2 * 1000 },
+  b05z: { label: "Blitz 5 + 0", base: 5 * 60 * 1000, inc: 0 },
+  b03z: { label: "Blitz 3 + 0", base: 3 * 60 * 1000, inc: 0 },
 
-  // Set up client info
-  ws.isAlive = true
-  ws.id = clientId
-  ws.room = null
+  // Bullet
+  bu2: { label: "Bullet 2 + 1", base: 2 * 60 * 1000, inc: 1 * 1000 },
+  bu1i: { label: "Bullet 1 + 1", base: 1 * 60 * 1000, inc: 1 * 1000 },
+  bu1: { label: "Bullet 1 + 0", base: 1 * 60 * 1000, inc: 0 },
+  bu30: { label: "Bullet 30 + 0", base: 30 * 1000, inc: 0 },
 
-  // Store client connection
-  clients.set(clientId, ws)
+  // UltraBullet
+  ub20: { label: "Ultrabullet 20 + 0", base: 20 * 1000, inc: 0 },
+  ub15: { label: "Ultrabullet 15 + 0", base: 15 * 1000, inc: 0 },
+} as const
+type TCId = keyof typeof TIME_CONTROLS
+/* ------------------------------------------------------------------ */
 
-  console.log(`Client connected: ${clientId} from ${req.headers.origin || req.headers.host}`)
-  console.log(`Total connections: ${clients.size}, Total rooms: ${gameRooms.size}`)
+type Status = "waiting" | "countdown" | "playing" | "checkmate" | "draw" | "stalemate"
 
-  // Setup ping-pong for connection health check
-  ws.on("pong", heartbeat)
-
-  // Handle messages from client
-  ws.on("message", (message) => {
-    try {
-      const data = JSON.parse(message)
-
-      // Handle different message types
-      switch (data.type) {
-        case "create_room":
-          handleCreateRoom(ws, data)
-          break
-
-        case "join_room":
-          handleJoinRoom(ws, data)
-          break
-
-        case "game_message":
-          handleGameMessage(ws, data)
-          break
-
-        case "leave_room":
-          handleLeaveRoom(ws)
-          break
-
-        case "ping":
-          // Just send a pong back with the same timestamp
-          ws.send(
-            JSON.stringify({
-              type: "pong",
-              timestamp: data.timestamp,
-            }),
-          )
-          break
-
-        case "recreate_room":
-          handleRecreateRoom(ws, data)
-          break
-
-        default:
-          console.log(`Unknown message type: ${data.type}`)
-      }
-    } catch (error) {
-      console.error("Error handling message:", error)
+type Msg =
+  | { type: "move"; uci: string; spent: number; fen: string; whiteMs: number; blackMs: number; status: string }
+  | { type: "resign" }
+  | { type: "rematch-offer" }
+  | { type: "rematch-accept" }
+  | { type: "draw-offer" }
+  | { type: "draw-accept" }
+  | { type: "game_end"; winner: "white" | "black" | null; isDraw: boolean; message: string }
+  | { type: "timer_sync"; whiteMs: number; blackMs: number; status: string; gameNo: number; fen: string }
+  | { type: "sync_request" }
+  | { type: "heartbeat"; whiteMs: number; blackMs: number }
+  | { type: "connection_status"; creatorConnected: boolean; joinerConnected: boolean }
+  | { type: "game_created"; playerPin: string; viewerPin: string; isCreator: boolean; creatorName: string }
+  | { type: "opponent-joined"; joinerName: string }
+  | { type: "viewer-joined"; creatorName: string; joinerName: string; viewerCount: number }
+  | {
+      type: "game_start"
+      settings: { timeControl: TCId; totalGames: number; countdown: number }
+      creatorName: string
+      joinerName: string
+      timestamp: number
     }
-  })
+  | { type: "error"; message: string }
 
-  // Handle disconnection
-  ws.on("close", (code, reason) => {
-    console.log(`Client disconnected: ${clientId}, Code: ${code}, Reason: ${reason || "No reason"}`)
-    console.log(`Remaining connections: ${clients.size - 1}, Remaining rooms: ${gameRooms.size}`)
-    handleLeaveRoom(ws)
-    clients.delete(clientId)
-  })
-
-  // Handle WebSocket errors
-  ws.on("error", (error) => {
-    console.error(`WebSocket error for client ${clientId}:`, error)
-  })
-
-  // Send initial connection acknowledgment
-  ws.send(
-    JSON.stringify({
-      type: "connection_established",
-      clientId,
-    }),
-  )
-})
-
-// Recreate a room with the same PIN for rematch
-function handleRecreateRoom(ws, data) {
-  const { pin, playerName, timeControl, totalGames, countdown } = data
-
-  console.log(`Recreating room with PIN: ${pin} for rematch`)
-
-  // Delete existing room if it exists
-  if (gameRooms.has(pin)) {
-    console.log(`Deleting existing room ${pin} for recreation`)
-    gameRooms.delete(pin)
-  }
-
-  // Create fresh room with same PIN
-  const room = {
-    id: pin,
-    creator: {
-      clientId: ws.id,
-      name: playerName,
-    },
-    joiner: null,
-    settings: {
-      timeControl,
-      totalGames,
-      countdown,
-    },
-    messages: [],
-    lastActivity: Date.now(),
-  }
-
-  gameRooms.set(pin, room)
-  ws.room = pin
-
-  console.log(`Room recreated: ${pin} by ${playerName} for rematch`)
-
-  ws.send(
-    JSON.stringify({
-      type: "room_recreated",
-      pin,
-      settings: room.settings,
-    }),
-  )
-}
-
-// Generate a random PIN
-function generatePin() {
+/* ---------- helpers ---------- */
+function randomPin() {
   const letters = Array(2)
     .fill(0)
     .map(() => String.fromCharCode(65 + Math.floor(Math.random() * 26)))
@@ -174,777 +84,1004 @@ function generatePin() {
   return letters + digits
 }
 
-// Create a new game room with two PINs - NO WebSocket connection yet
-function handleCreateRoom(ws, data) {
-  const { playerName, timeControl, totalGames, countdown } = data
+/* ----------------------------- */
 
-  // Generate two unique PINs
-  let playerPin, viewerPin
-  do {
-    playerPin = generatePin()
-  } while (pinToRoom.has(playerPin))
+export default function QuickGamePage() {
+  // Get WebRTC game functions with error handling
+  const webRTCData = useWebRTCGame()
 
-  do {
-    viewerPin = generatePin()
-  } while (pinToRoom.has(viewerPin) || viewerPin === playerPin)
+  const {
+    isCreator,
+    pin,
+    playerPin,
+    viewerPin,
+    creatorName,
+    joinerName,
+    connReady,
+    openConnection,
+    connectAsViewer,
+    pushMove,
+    pushRematchOffer,
+    push,
+    registerMessageCallback,
+    connectionInfo,
+    isViewer,
+    viewerCount,
+    viewerWaiting,
+    closeConnection,
+    setConnReady,
+  } = webRTCData
 
-  // Create a new room with unique room ID - LOBBY state (no active connections)
-  const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  const room = {
-    id: roomId,
-    playerPin: playerPin,
-    viewerPin: viewerPin,
-    state: "lobby", // New state: lobby -> active -> ended
-    creator: {
-      name: playerName,
-      connected: false,
-    },
-    joiner: {
-      name: null,
-      connected: false,
-    },
-    viewers: [], // Array to store viewer connections
-    originalCreatorName: playerName, // Track original creator
-    originalJoinerName: null, // Track original joiner
-    lastActivity: Date.now(), // Track activity for auto-close
-    settings: {
-      timeControl,
-      totalGames,
-      countdown,
-    },
-    gameState: {
-      fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", // Starting position
-      moves: [], // Array of moves in UCI format
-      turn: "w", // Current turn
-      status: "waiting", // waiting, playing, ended
-    },
-    messages: [],
+  // Inside QuickGamePage component, add the router instance
+  const router = useRouter()
+
+  const [game, setGame] = useState(new Chess())
+  const gameRef = useRef<Chess>(game)
+  const [status, setStatus] = useState<Status>("waiting")
+  const [locallyDisconnected, setLocallyDisconnected] = useState(false)
+
+  const [pendingPin, setPendingPin] = useState("")
+  const [viewerPinInput, setViewerPinInput] = useState("")
+  const [playerName, setPlayerName] = useState("") // For online mode
+  const [boardSize, setBoardSize] = useState(360) // Default to 10% smaller for mobile (was 400)
+  const [clickedSquare, setClickedSquare] = useState<string | null>(null)
+
+  // Keep gameRef in sync with game state
+  useEffect(() => {
+    gameRef.current = game
+  }, [game])
+
+  // Reset local disconnection flag when a fresh connection is established
+  useEffect(() => {
+    if (connReady) {
+      setLocallyDisconnected(false)
+      // Reset opponent heartbeat timer when we reconnect
+      lastOpponentHeartbeat.current = Date.now()
+      setOpponentConnected(true)
+    }
+  }, [connReady])
+
+  const [resigned, setResigned] = useState(false)
+  const [gameNo, setGameNo] = useState(1) // 1st, 2nd, 3rd … game of the session
+
+  const [selectedColor, setSelectedColor] = useState<"white" | "black">("white") // For online mode
+  const [alternateRematches, setAlternateRematches] = useState(true) // Changed default to true
+  const [timeCtrl, setTimeCtrl] = useState<TCId>("b05") /* ✱ */
+
+  const { playSound, isMuted } = useSound() // Get playSound from the context
+
+  // NEW: State for premoves and their highlights
+  const [premoves, setPremove] = useState<string[]>([])
+  const [premoveHighlights, setPremoveHighlights] = useState<Record<string, { background: string }>>({})
+  const [dragVec, setDragVec] = useState<[number, number]>([0, 0])
+
+  /* ---- clocks ---------------------------------------------------- */
+  const [whiteMs, setWhiteMs] = useState(TIME_CONTROLS[timeCtrl].base)
+  const [blackMs, setBlackMs] = useState(TIME_CONTROLS[timeCtrl].base)
+  const turnStart = useRef<number | null>(null)
+  const tickId = useRef<ReturnType<typeof setInterval> | null>(null)
+  const lowTimeWarningPlayed = useRef({ white: false, black: false }) // To prevent spamming low time warning
+
+  const [countDown, setCountDown] = useState(0) // in ms, e.g. 10000
+
+  // ---- ONLINE-ONLY state ----
+  const [showOnlineOptions, setShowOnlineOptions] = useState(false)
+  const [showModeSelection, setShowModeSelection] = useState(true)
+  const [gameStarted, setGameStarted] = useState(false)
+  const [isCreatorWaiting, setIsCreatorWaiting] = useState(false)
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  // ----------------------------------------------------------------------
+  // Add a new state variable at the top of the `QuickGamePage` component, alongside other `useState` declarations:
+  const [lastMoveSquares, setLastMoveSquares] = useState<{ from: string; to: string } | null>(null)
+  const [onlineModeType, setOnlineModeType] = useState<"invite" | "invitee" | null>(null)
+  const [totalGamesInput, setTotalGamesInput] = useState<string>("1")
+  const actualTotalGames = totalGamesInput === "" ? 1 : Number(totalGamesInput)
+
+  // Helper function to get current effective total games for display
+  const getCurrentTotalGames = () => {
+    if (isCreator) {
+      // Creator uses their own total games setting (extended automatically in startFreshGame)
+      return actualTotalGames
+    } else {
+      // Joiner uses the opponent's total games setting (extended automatically in startFreshGame)
+      return opponentTotalGames
+    }
   }
+  const [opponentTotalGames, setOpponentTotalGames] = useState<number>(1) // For the joiner to receive
+  const [countdownDuration, setCountdownDuration] = useState(5)
 
-  // Store room and create PIN mappings
-  gameRooms.set(roomId, room)
-  pinToRoom.set(playerPin, room)
-  pinToRoom.set(viewerPin, room)
+  // Add new state and ref at the top of the component, alongside other `useState` and `useRef` declarations:
+  const [tempMouseDownSquare, setTempMouseDownSquare] = useState<string | null>(null)
+  const [gameEndMessage, setGameEndMessage] = useState<string | null>(null)
+  const boardContainerRef = useRef<HTMLDivElement>(null)
 
-  console.log(`Room lobby created: ${roomId} by ${playerName}`)
-  console.log(`Player PIN: ${playerPin}, Viewer PIN: ${viewerPin}`)
-  console.log(`Room data:`, JSON.stringify(room, null, 2))
+  // NEW: State for scores and who resigned
+  const [player1Score, setPlayer1Score] = useState(0)
+  const [player2Score, setPlayer2Score] = useState(0)
+  const [resignedBy, setResignedBy] = useState<"white" | "black" | null>(null)
 
-  // Send a response with both PINs - then CLOSE this connection to save costs
-  const responseData = {
-    type: "room_created",
-    playerPin: playerPin,
-    viewerPin: viewerPin,
-    creatorName: playerName,
-    settings: room.settings,
-    // Add a full response for debugging
-    debugInfo: {
-      timestamp: Date.now(),
-      roomCount: gameRooms.size,
-      clientCount: clients.size,
+  // State for persistent player labels (survive disconnect/reconnect)
+  const [creatorLabel, setCreatorLabel] = useState<string>("Player 1")
+  const [joinerLabel, setJoinerLabel] = useState<string>("Player 2")
+  const [rematchPending, setRematchPending] = useState(false)
+
+  // State for rematch offer modal
+  const [rematchOfferReceived, setRematchOfferReceived] = useState(false)
+  const [rematchOfferedBy, setRematchOfferedBy] = useState<string>("")
+  const [rematchOfferSent, setRematchOfferSent] = useState(false)
+
+  // State for draw offer modal
+  const [drawOfferReceived, setDrawOfferReceived] = useState(false)
+  const [drawOfferedBy, setDrawOfferedBy] = useState<string>("")
+  const [drawOfferSent, setDrawOfferSent] = useState(false)
+
+  // State for post-resignation rematch modal
+  const [showPostResignationModal, setShowPostResignationModal] = useState(false)
+
+  // State for disconnect confirmation modal
+  const [showDisconnectModal, setShowDisconnectModal] = useState(false)
+
+  // State for opponent connection status
+  const [opponentConnected, setOpponentConnected] = useState<boolean | null>(null) // null = unknown (gray), true = connected (green), false = disconnected (red)
+  const lastOpponentHeartbeat = useRef<number>(Date.now())
+
+  // State for viewer connection status (received from creator)
+  const [viewerConnectionStatus, setViewerConnectionStatus] = useState({
+    creatorConnected: true,
+    joinerConnected: true,
+  })
+
+  // State for viewer board orientation
+  const [viewerBoardOrientation, setViewerBoardOrientation] = useState<"white" | "black">("white")
+
+  // State for copy button feedback
+  const [playerPinCopied, setPlayerPinCopied] = useState(false)
+  const [viewerPinCopied, setViewerPinCopied] = useState(false)
+  const [pgnCopied, setPgnCopied] = useState(false)
+
+  // State to track if we just requested a sync (to avoid processing our own response)
+  const [justRequestedSync, setJustRequestedSync] = useState(false)
+
+  // Helper function for copy with feedback
+  const handleCopyWithFeedback = useCallback(
+    (text: string, setFeedback: (value: boolean) => void) => {
+      navigator.clipboard.writeText(text)
+      playSound("button_click")
+      setFeedback(true)
+      setTimeout(() => setFeedback(false), 3000) // Reset after 3 seconds
     },
-  }
+    [playSound],
+  )
 
-  console.log("Sending room_created response:", JSON.stringify(responseData))
+  // Helper function to build proper PGN with custom headers
+  const buildPGN = useCallback(
+    (game: Chess, gameNumber: number) => {
+      const today = new Date()
+      const year = today.getFullYear()
+      const month = String(today.getMonth() + 1).padStart(2, "0")
+      const day = String(today.getDate()).padStart(2, "0")
 
-  try {
-    ws.send(JSON.stringify(responseData))
-    console.log("Room created response sent successfully")
+      const tags = [
+        `[Event "Game ${gameNumber}"]`,
+        `[Site "chessaki.com"]`,
+        `[Date "${year}.${month}.${day}"]`,
+        `[Round "${gameNumber}"]`,
+        `[White "${creatorLabel || "Player 1"}"]`,
+        `[Black "${joinerLabel || "Player 2"}"]`,
+        "", // blank line before moves
+      ]
 
-    // Close the connection immediately to save costs - player will reconnect when game is ready
-    setTimeout(() => {
-      console.log("Closing room creation connection to save costs")
-      ws.close(1000, "Room created successfully")
-    }, 1000)
-  } catch (error) {
-    console.error("Error sending room_created response:", error)
-  }
-}
-
-// Join an existing game room
-function handleJoinRoom(ws, data) {
-  const { pin, playerName } = data
-
-  console.log(`Join room request: PIN=${pin}, Player=${playerName}, ClientID=${ws.id}`)
-  console.log(`Current PIN mappings:`, Array.from(pinToRoom.keys()))
-
-  // Check if the PIN exists
-  if (!pinToRoom.has(pin)) {
-    console.log(`PIN ${pin} not found`)
-    ws.send(
-      JSON.stringify({
-        type: "error",
-        message: "PIN not found",
-      }),
-    )
-    return
-  }
-
-  const room = pinToRoom.get(pin)
-  console.log(`Found room for PIN ${pin}:`, JSON.stringify(room, null, 2))
-
-  // Determine if this is a player PIN or viewer PIN
-  const isPlayerPin = pin === room.playerPin
-  const isViewerPin = pin === room.viewerPin
-
-  console.log(`PIN type: ${isPlayerPin ? "player" : "viewer"} PIN`)
-
-  // Handle joining based on PIN type
-  if (isViewerPin) {
-    // Viewer PIN - check if game is active before allowing connection
-
-    if (room.state === "lobby") {
-      // Game not started yet - deny WebSocket connection and tell them to wait
-      console.log(`Viewer ${playerName} trying to join lobby room - sending wait response`)
-
-      const waitResponse = {
-        type: "viewer_wait",
-        message: "Game not started yet - please wait for players to connect",
-        playerPin: room.playerPin,
-        viewerPin: room.viewerPin,
-        creatorName: room.creator.name,
-        settings: room.settings,
-        gameReady: false,
+      // Format moves as "1. e4 e5 5. Nf3 Nc6 ..."
+      const history = game.history()
+      const moveText = []
+      for (let i = 0; i < history.length; i += 2) {
+        const moveNumber = Math.floor(i / 2) + 1
+        const whiteMove = history[i]
+        const blackMove = history[i + 1] || "—"
+        if (blackMove) {
+          moveText.push(`${moveNumber}. ${whiteMove} ${blackMove}`)
+        } else {
+          moveText.push(`${moveNumber}. ${whiteMove}`)
+        }
       }
 
-      ws.send(JSON.stringify(waitResponse))
+      return tags.join("\n") + "\n" + moveText.join(" ")
+    },
+    [creatorLabel, joinerLabel],
+  )
 
-      // Close connection after sending response to save costs
-      setTimeout(() => {
-        console.log("Closing viewer connection - game not ready")
-        ws.close(1000, "Game not started yet")
-      }, 1000)
+  /** decide what colour the CREATOR has in the *current* game */
+  // Changed to a function declaration for hoisting
+  function colourOfCreator(): "white" | "black" {
+    if (!alternateRematches) return selectedColor
+    // flip every new game
+    return gameNo % 2 === 1 ? selectedColor : selectedColor === "white" ? "black" : "white"
+  }
+
+  /* Board orientation for online games only */
+  const myBoardOrientation = isViewer
+    ? viewerBoardOrientation
+    : isCreator
+      ? colourOfCreator()
+      : colourOfCreator() === "white"
+        ? "black"
+        : "white"
+
+  // Derived player names for scoring (consistent across rematches)
+  // Use persistent labels that survive disconnect/reconnect cycles
+  const player1NameForScore = creatorLabel
+  const player2NameForScore = joinerLabel
+
+  // Update persistent labels whenever hook provides names
+  useEffect(() => {
+    if (creatorName) setCreatorLabel(creatorName)
+    if (joinerName) setJoinerLabel(joinerName)
+  }, [creatorName, joinerName])
+
+  // Send timer sync to new viewers when they join
+  const lastViewerCount = useRef(viewerCount)
+
+  useEffect(() => {
+    if (
+      !isViewer &&
+      connReady &&
+      status === "playing" &&
+      isCreator &&
+      viewerCount > lastViewerCount.current // viewer(s) just joined
+    ) {
+      console.log("Sending one-off timer sync to new viewer(s)")
+      push({
+        type: "timer_sync",
+        whiteMs,
+        blackMs,
+        status,
+        gameNo,
+        fen: game.fen(),
+      })
+    }
+    lastViewerCount.current = viewerCount
+  }, [viewerCount, isViewer, connReady, status, isCreator, whiteMs, blackMs, push, gameNo, game])
+
+  // Heartbeat system - send heartbeat every 7 seconds to opponent
+  useEffect(() => {
+    if (!connReady || isViewer) return
+
+    const sendHeartbeat = () => {
+      console.log("Sending heartbeat to opponent with timers")
+      // NEW: Send current clock values with heartbeat
+      push({
+        type: "heartbeat",
+        whiteMs: whiteMs,
+        blackMs: blackMs,
+      })
+    }
+
+    // Send initial heartbeat immediately
+    sendHeartbeat()
+
+    // Set up interval to send heartbeat every 7 seconds
+    const heartbeatInterval = setInterval(sendHeartbeat, 7000)
+
+    return () => clearInterval(heartbeatInterval)
+  }, [connReady, isViewer, push, whiteMs, blackMs]) // Add whiteMs and blackMs
+
+  // Check opponent heartbeat - mark as disconnected if no heartbeat for 25 seconds
+  useEffect(() => {
+    if (!connReady || isViewer) return
+
+    const checkOpponentHeartbeat = () => {
+      const now = Date.now()
+      const timeSinceLastHeartbeat = now - lastOpponentHeartbeat.current
+
+      if (timeSinceLastHeartbeat > 13000) {
+        // 13 seconds
+        console.log(`Opponent heartbeat timeout: ${timeSinceLastHeartbeat}ms since last heartbeat`)
+        setOpponentConnected(false)
+      }
+    }
+
+    // Check every 5 seconds
+    const checkInterval = setInterval(checkOpponentHeartbeat, 5000)
+
+    return () => clearInterval(checkInterval)
+  }, [connReady, isViewer])
+
+  // Creator broadcasts connection status to viewers every 30 seconds
+  useEffect(() => {
+    if (!connReady || isViewer || !isCreator) return
+
+    const sendConnectionStatus = () => {
+      push({
+        type: "connection_status",
+        creatorConnected: connReady,
+        joinerConnected: opponentConnected === null ? false : opponentConnected, // treat null as disconnected for viewers
+      })
+    }
+
+    // Send initial status immediately
+    sendConnectionStatus()
+
+    // Set up interval to send connection status every 30 seconds
+    const statusInterval = setInterval(sendConnectionStatus, 30000)
+
+    return () => clearInterval(statusInterval)
+  }, [connReady, isViewer, isCreator, opponentConnected, push])
+
+  // Send sync request when reconnecting
+  useEffect(() => {
+    if (connReady && !isViewer && status !== "waiting") {
+      setJustRequestedSync(true)
+      push({ type: "sync_request" }) // 👈 new handshake request
+    }
+  }, [connReady]) // one-shot per reconnection
+
+  // Creator polling logic
+  useEffect(() => {
+    if (!isCreator || !playerPin || !isCreatorWaiting) {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+      return
+    }
+
+    console.log(`Creator is waiting. Starting to poll game status for PIN: ${playerPin}`)
+
+    const poll = async () => {
+      try {
+        const serverBaseUrl = process.env.NEXT_PUBLIC_WEBSOCKET_SERVER
+          ? process.env.NEXT_PUBLIC_WEBSOCKET_SERVER.replace(/^wss?:\/\//, "https://") // Convert ws/wss to http/https
+          : "http://localhost:8080" // Fallback for local dev
+
+        const response = await fetch(`${serverBaseUrl}/api/game-status/${playerPin}`)
+        if (!response.ok) {
+          console.error("Polling failed:", response.statusText)
+          if (response.status === 404) {
+            setIsCreatorWaiting(false)
+          }
+          return
+        }
+        const data = await response.json()
+        console.log("Polling response:", data)
+
+        if (data.gameReady) {
+          console.log("Joiner has connected! Creator is now connecting to WebSocket...")
+          setIsCreatorWaiting(false) // This will stop the polling via the effect's dependency check
+
+          // Creator connects to the WebSocket to start the game.
+          openConnection(playerPin, creatorName, true)
+        }
+      } catch (error) {
+        console.error("Error during polling:", error)
+      }
+    }
+
+    pollingIntervalRef.current = setInterval(poll, 3000)
+    poll() // Poll immediately
+
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+  }, [isCreator, playerPin, isCreatorWaiting, openConnection, creatorName])
+
+  /* countdown effect */
+  useEffect(() => {
+    if (status !== "countdown") return
+    if (countDown <= 0) {
+      setStatus("playing")
+      playSound("game_start")
+
+      /* Only start White's clock for truly new games, not reconnections */
+      /* For reconnections, the clock should already be running for the correct player */
+      if (game.history().length === 0) {
+        // New game - everyone starts White's clock; Black's will start after the first move
+        console.log("New game countdown finished - starting White's clock")
+        startClock("w")
+      } else {
+        // Reconnection scenario - don't reset clocks, just continue for current turn
+        console.log("Reconnection countdown finished - continuing clock for current player:", game.turn())
+        startClock(game.turn()) // Continue clock for whoever's turn it actually is
+      }
 
       return
-    } else if (room.state === "active") {
-      // Game is active - allow viewer to connect
-      console.log(`Viewer PIN used, adding ${playerName} as viewer to active game`)
-
-      const viewer = {
-        clientId: ws.id,
-        name: playerName,
-      }
-
-      room.viewers.push(viewer)
-      ws.room = room.id
-      ws.isViewer = true
-      ws.pinType = "viewer"
-
-      console.log(`Player ${playerName} joined active room as viewer via viewer PIN`)
-
-      // Notify the viewer they joined as a viewer
-      const viewerResponse = {
-        type: "room_joined",
-        pin: pin,
-        playerPin: room.playerPin,
-        viewerPin: room.viewerPin,
-        creatorName: room.creator.name,
-        joinerName: room.joiner?.name || null,
-        settings: room.settings,
-        isViewer: true,
-        viewerCount: room.viewers.length,
-        gameActive: true,
-      }
-
-      console.log("Sending viewer room_joined response:", JSON.stringify(viewerResponse))
-      ws.send(JSON.stringify(viewerResponse))
-
-      // Request timer sync from creator for the new viewer
-      requestTimerSyncForViewer(room, ws)
-
-      // Notify all players and viewers about updated viewer count
-      broadcastViewerUpdate(room)
     }
-  } else if (isPlayerPin) {
-    // Player PIN - check room state and handle accordingly
+    const id = setInterval(() => {
+      setCountDown((ms) => ms - 1000)
+      playSound("timer_tick", 0.3) // Play a subtle tick sound during countdown
+    }, 1000)
+    return () => clearInterval(id)
+  }, [status, countDown, isCreator, selectedColor, playSound, game])
 
-    if (room.state === "lobby") {
-      // Room is in lobby state - this is the SECOND player joining!
-      console.log(`Second player ${playerName} joining lobby room - activating game!`)
-
-      // Set joiner info with client ID
-      room.joiner.name = playerName
-      room.joiner.connected = true
-      room.joiner.clientId = ws.id
-      room.originalJoinerName = playerName
-
-      // Activate the room
-      room.state = "active"
-      room.lastActivity = Date.now()
-
-      // This player stays connected
-      ws.room = room.id
-      ws.isViewer = false
-      ws.pinType = "player"
-
-      // Send response to joiner with complete game settings
-      const joinResponse = {
-        type: "room_joined",
-        pin: pin,
-        playerPin: room.playerPin,
-        viewerPin: room.viewerPin,
-        creatorName: room.creator.name,
-        joinerName: playerName,
-        settings: room.settings, // Include all game settings from creator
-        isViewer: false,
-        viewerCount: room.viewers.length,
-        gameReady: true, // Game is ready for creator to join
-        gameActive: false, // Game is not yet started
-      }
-
-      ws.send(JSON.stringify(joinResponse))
-      console.log("Joiner connected - waiting for creator to start the game.")
-
-      // DO NOT broadcast game start here. Wait for creator to connect.
-    } else if (room.state === "active") {
-      // Room is already active - check if this is a player reconnecting
-
-      if (playerName === room.creator.name && !room.creator.clientId) {
-        // This is the creator connecting (for the first time to the active game, or reconnecting)
-        console.log(`Creator ${playerName} reconnecting to active room`)
-
-        room.creator.clientId = ws.id
-        room.creator.connected = true
-        ws.room = room.id
-        ws.isViewer = false
-        ws.pinType = "player"
-
-        const creatorResponse = {
-          type: "room_joined",
-          pin: pin,
-          playerPin: room.playerPin,
-          viewerPin: room.viewerPin,
-          creatorName: room.creator.name,
-          joinerName: room.joiner.name,
-          settings: room.settings,
-          isViewer: false,
-          viewerCount: room.viewers.length,
-          gameActive: true,
-          gameReady: true,
-        }
-
-        ws.send(JSON.stringify(creatorResponse))
-        console.log("Creator reconnected successfully")
-
-        // Only broadcast game start if both players are now connected
-        if (room.creator.clientId && room.joiner.clientId) {
-          console.log("Both players are now connected - broadcasting game start.")
-          broadcastGameStart(room)
-        } else {
-          console.log("Creator connected, but joiner is missing. Waiting for joiner to reconnect.")
-        }
-      } else if (playerName === room.joiner.name && !room.joiner.clientId) {
-        // This is the joiner reconnecting
-        console.log(`Joiner ${playerName} reconnecting to active room`)
-
-        room.joiner.clientId = ws.id
-        room.joiner.connected = true
-        ws.room = room.id
-        ws.isViewer = false
-        ws.pinType = "player"
-
-        const joinerResponse = {
-          type: "room_joined",
-          pin: pin,
-          playerPin: room.playerPin,
-          viewerPin: room.viewerPin,
-          creatorName: room.creator.name,
-          joinerName: room.joiner.name,
-          settings: room.settings,
-          isViewer: false,
-          viewerCount: room.viewers.length,
-          gameActive: true,
-          gameReady: true,
-        }
-
-        ws.send(JSON.stringify(joinerResponse))
-        console.log("Joiner reconnected successfully")
-
-        // If creator is already here, we can start the game (or resync)
-        if (room.creator.clientId && room.joiner.clientId) {
-          console.log("Both players connected after joiner reconnect - broadcasting game start")
-          broadcastGameStart(room)
-
-          // Request timer sync from creator for the reconnecting joiner
-          if (room.creator.clientId) {
-            requestTimerSyncFromPlayer(room, room.creator.clientId, "joiner reconnected")
-          }
-        } else {
-          console.log("Joiner reconnected, but creator is missing. Waiting for creator to reconnect.")
-        }
-      } else {
-        // Room is already active - add as viewer
-        console.log(`Room is active, adding ${playerName} as viewer`)
-
-        const viewer = {
-          clientId: ws.id,
-          name: playerName,
-        }
-
-        room.viewers.push(viewer)
-        ws.room = room.id
-        ws.isViewer = true
-        ws.pinType = "viewer"
-
-        const viewerResponse = {
-          type: "room_joined",
-          pin: pin,
-          playerPin: room.playerPin,
-          viewerPin: room.viewerPin,
-          creatorName: room.creator.name,
-          joinerName: room.joiner.name,
-          settings: room.settings,
-          isViewer: true,
-          viewerCount: room.viewers.length,
-          message: "Game already active - joined as viewer",
-        }
-
-        ws.send(JSON.stringify(viewerResponse))
-
-        // Request timer sync from creator for the new viewer
-        requestTimerSyncForViewer(room, ws)
-
-        broadcastViewerUpdate(room)
-      }
-    }
+  const startClock = (colour: "w" | "b") => {
+    stopClock()
+    turnStart.current = Date.now()
+    console.log(`Starting ${colour === "w" ? "White" : "Black"}'s clock`)
+    tickId.current = setInterval(() => {
+      const now = Date.now()
+      const spent = now - (turnStart.current ?? now)
+      if (colour === "w") setWhiteMs((ms) => Math.max(ms - spent, 0))
+      else setBlackMs((ms) => Math.max(ms - spent, 0))
+      turnStart.current = now
+    }, 100)
   }
-}
-
-// Broadcast viewer count update to all participants in a room
-function broadcastViewerUpdate(room) {
-  const viewerUpdateMsg = {
-    type: "viewer_update",
-    viewerCount: room.viewers.length,
+  const stopClock = () => {
+    if (tickId.current) clearInterval(tickId.current)
+    tickId.current = null
+    turnStart.current = null
   }
 
-  // Send to creator if connected
-  if (room.creator.clientId) {
-    const creatorWs = clients.get(room.creator.clientId)
-    if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-      creatorWs.send(JSON.stringify(viewerUpdateMsg))
-    }
-  }
-
-  // Send to joiner if exists and connected
-  if (room.joiner && room.joiner.clientId) {
-    const joinerWs = clients.get(room.joiner.clientId)
-    if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
-      joinerWs.send(JSON.stringify(viewerUpdateMsg))
-    }
-  }
-
-  // Send to all viewers
-  room.viewers.forEach((viewer) => {
-    const viewerWs = clients.get(viewer.clientId)
-    if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
-      viewerWs.send(JSON.stringify(viewerUpdateMsg))
-    }
-  })
-
-  console.log(`Broadcast viewer update: ${room.viewers.length} viewers`)
-}
-
-// Broadcast game start to synchronize both players
-function broadcastGameStart(room) {
-  console.log("Broadcasting game start to both players...")
-
-  const gameStartMsg = {
-    type: "game_start",
-    creatorName: room.creator.name,
-    joinerName: room.joiner.name,
-    settings: room.settings,
-    playerPin: room.playerPin,
-    viewerPin: room.viewerPin,
-    viewerCount: room.viewers.length,
-    timestamp: Date.now(), // Add synchronized timestamp
-    gameState: room.gameState, // Include current game state for sync
-  }
-
-  console.log("Game start message:", JSON.stringify(gameStartMsg))
-
-  // Send to creator if connected
-  if (room.creator.clientId) {
-    const creatorWs = clients.get(room.creator.clientId)
-    if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-      console.log("Sending game start to creator")
-      creatorWs.send(JSON.stringify(gameStartMsg))
-    } else {
-      console.log("Creator WebSocket not available")
-    }
-  } else {
-    console.log("Creator clientId not set")
-  }
-
-  // Send to joiner if exists and connected
-  if (room.joiner && room.joiner.clientId) {
-    const joinerWs = clients.get(room.joiner.clientId)
-    if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
-      console.log("Sending game start to joiner")
-      joinerWs.send(JSON.stringify(gameStartMsg))
-    } else {
-      console.log("Joiner WebSocket not available")
-    }
-  } else {
-    console.log("Joiner clientId not set")
-  }
-
-  // Send to all viewers
-  room.viewers.forEach((viewer) => {
-    const viewerWs = clients.get(viewer.clientId)
-    if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
-      viewerWs.send(JSON.stringify(gameStartMsg))
-    }
-  })
-
-  console.log(`Broadcast game start complete`)
-}
-
-// Request timer sync from creator for new viewers
-function requestTimerSyncForViewer(room, viewerWs) {
-  if (room.creator.clientId) {
-    const creatorWs = clients.get(room.creator.clientId)
-    if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-      console.log("Requesting timer sync from creator for new viewer")
-      creatorWs.send(
-        JSON.stringify({
-          type: "game_message",
-          message: { type: "sync_request" },
-        }),
-      )
-    }
-  }
-}
-
-// Request timer sync from connected player for reconnecting player
-function requestTimerSyncFromPlayer(room, fromClientId, reason) {
-  const fromWs = clients.get(fromClientId)
-  if (fromWs && fromWs.readyState === WebSocket.OPEN) {
-    console.log(`Requesting timer sync from connected player: ${reason}`)
-    fromWs.send(
-      JSON.stringify({
-        type: "game_message",
-        message: { type: "sync_request" },
-      }),
-    )
-  }
-}
-
-// Forward game messages between players
-function handleGameMessage(ws, data) {
-  const { pin, message } = data
-
-  if (!pin || !ws.room) {
-    ws.send(
-      JSON.stringify({
-        type: "error",
-        message: "Not in a valid room",
-      }),
-    )
-    return
-  }
-
-  // Find room by PIN (could be player or viewer PIN)
-  const room = pinToRoom.get(pin)
-  if (!room) {
-    ws.send(
-      JSON.stringify({
-        type: "error",
-        message: "Room not found",
-      }),
-    )
-    return
-  }
-
-  // Verify the WebSocket is actually in this room
-  if (ws.room !== room.id) {
-    ws.send(
-      JSON.stringify({
-        type: "error",
-        message: "WebSocket not in the correct room",
-      }),
-    )
-    return
-  }
-
-  // Update room activity timestamp
-  room.lastActivity = Date.now()
-
-  // Track moves in room game state
-  if (message.type === "move") {
-    room.gameState.moves.push(message.uci)
-    room.gameState.turn = room.gameState.turn === "w" ? "b" : "w"
-    console.log(`Move tracked: ${message.uci}, moves: ${room.gameState.moves.length}, turn: ${room.gameState.turn}`)
-  }
-
-  // Reset game state on resignation, game end, or draw accept for fresh game
-  if (message.type === "resign" || message.type === "game_end" || message.type === "draw-accept") {
-    console.log(`${message.type} detected - preparing for fresh game state`)
-    room.gameState = {
-      fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-      moves: [],
-      turn: "w",
-      status: "waiting",
-    }
-    console.log("Game state reset for fresh game")
-  }
-
-  // If rematch accepted, reset game state and broadcast game_start
-  if (message.type === "rematch-accept") {
-    console.log("Rematch accepted - resetting game state and broadcasting game start")
-    room.gameState = {
-      fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-      moves: [],
-      turn: "w",
-      status: "waiting",
-    }
-    broadcastGameStart(room) // Trigger game_start for both players
-  }
-
-  // Determine the recipient
-  let recipientId
-  if (ws.id === room.creator.clientId) {
-    recipientId = room.joiner?.clientId
-  } else if (room.joiner && ws.id === room.joiner.clientId) {
-    recipientId = room.creator.clientId
-  }
-
-  // Forward the message to the recipient
-  if (recipientId) {
-    const recipientWs = clients.get(recipientId)
-    if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
-      recipientWs.send(
-        JSON.stringify({
-          type: "game_message",
-          message,
-        }),
-      )
-    }
-  }
-
-  // Also send game messages to all viewers so they can watch the game
-  if (
-    message.type === "move" ||
-    message.type === "resign" ||
-    message.type === "rematch-offer" ||
-    message.type === "rematch-accept" ||
-    message.type === "game_end" ||
-    message.type === "draw-offer" ||
-    message.type === "draw-accept" ||
-    message.type === "timer_sync" ||
-    message.type === "connection_status"
-  ) {
-    room.viewers.forEach((viewer) => {
-      const viewerWs = clients.get(viewer.clientId)
-      if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
-        viewerWs.send(
-          JSON.stringify({
-            type: "game_message",
-            message,
-          }),
-        )
-      }
-    })
-  }
-
-  // Save last few messages for history (optional)
-  room.messages.push({
-    from: ws.id,
-    message,
-    timestamp: Date.now(),
-  })
-
-  // Keep only last 20 messages
-  if (room.messages.length > 20) {
-    room.messages.shift()
-  }
-}
-
-// Handle a player leaving a room
-function handleLeaveRoom(ws) {
-  if (!ws.room) return
-
-  const roomId = ws.room
-  if (!gameRooms.has(roomId)) return
-
-  const room = gameRooms.get(roomId)
-
-  // Check if the leaving client is a viewer
-  if (ws.isViewer) {
-    // Remove from viewers list
-    room.viewers = room.viewers.filter((viewer) => viewer.clientId !== ws.id)
-    console.log(`Viewer left room ${roomId}. Remaining viewers: ${room.viewers.length}`)
-
-    // Notify all participants about updated viewer count
-    broadcastViewerUpdate(room)
-  } else if (room.creator.clientId === ws.id) {
-    // Creator disconnected (likely temporary due to Railway timeout)
-    console.log(`Creator temporarily disconnected from room ${roomId}`)
-
-    // Mark creator as disconnected but preserve their slot
-    room.creator.connected = false
-    room.creator.clientId = null
-
-    // Don't send opponent_left immediately - this might be a temporary disconnect
-    console.log(`Creator slot preserved for reconnection in room ${roomId}`)
-  } else if (room.joiner && room.joiner.clientId === ws.id) {
-    // Joiner disconnected (likely temporary due to Railway timeout)
-    console.log(`Joiner temporarily disconnected from room ${roomId}`)
-
-    // Mark joiner as disconnected but preserve their slot
-    room.joiner.connected = false
-    room.joiner.clientId = null
-
-    // Don't send opponent_left immediately - this might be a temporary disconnect
-    console.log(`Joiner slot preserved for reconnection in room ${roomId}`)
-  }
-
-  ws.room = null
-  ws.isViewer = false
-}
-
-// Ping connections every 15 seconds for cost optimization
-const pingInterval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) {
-      handleLeaveRoom(ws)
-      return ws.terminate()
-    }
-
-    ws.isAlive = false
-    ws.ping()
-  })
-}, 15000)
-
-// Check for inactive rooms every 30 seconds
-const cleanupInterval = setInterval(() => {
-  const now = Date.now()
-  const INACTIVE_TIMEOUT = 5 * 60 * 1000 // 5 minutes of inactivity - give more time for players to join
-
-  // Check for inactive rooms to close
-  for (const [pin, room] of gameRooms.entries()) {
-    const timeSinceActivity = now - room.lastActivity
-
-    if (timeSinceActivity > INACTIVE_TIMEOUT) {
-      console.log(`Closing inactive room ${pin} (inactive for ${Math.round(timeSinceActivity / 1000)}s)`)
-
-      // Notify all participants before closing
-      const closeMessage = {
-        type: "room_closed",
-        reason: "Room closed due to inactivity",
-      }
-
-      // Notify creator
-      if (room.creator) {
-        const creatorWs = clients.get(room.creator.clientId)
-        if (creatorWs && creatorWs.readyState === WebSocket.OPEN) {
-          creatorWs.send(JSON.stringify(closeMessage))
-          creatorWs.close()
-        }
-      }
-
-      // Notify joiner
-      if (room.joiner) {
-        const joinerWs = clients.get(room.joiner.clientId)
-        if (joinerWs && joinerWs.readyState === WebSocket.OPEN) {
-          joinerWs.send(JSON.stringify(closeMessage))
-          joinerWs.close()
-        }
-      }
-
-      // Notify viewers
-      room.viewers.forEach((viewer) => {
-        const viewerWs = clients.get(viewer.clientId)
-        if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
-          viewerWs.send(JSON.stringify(closeMessage))
-          viewerWs.close()
-        }
-      })
-
-      // Delete the room and PIN mappings
-      pinToRoom.delete(room.playerPin)
-      pinToRoom.delete(room.viewerPin)
-      gameRooms.delete(pin)
-    }
-  }
-
-  console.log(`Active rooms: ${gameRooms.size}, Active connections: ${clients.size}`)
-}, 30000)
-
-// Clean up intervals on server close
-wss.on("close", () => {
-  clearInterval(pingInterval)
-  clearInterval(cleanupInterval)
-})
-
-// Health check endpoint
-app.get("/health", (req, res) => {
-  const serverInfo = {
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    connections: {
-      total: wss.clients.size,
-      rooms: gameRooms.size,
+  // Helper to get player name by color (for scoring)
+  const getPlayerNameByColor = useCallback(
+    (color: "white" | "black") => {
+      const creatorColorThisGame = colourOfCreator()
+      return color === creatorColorThisGame ? creatorName : joinerName
     },
-    uptime: process.uptime(),
+    [creatorName, joinerName],
+  )
+
+  // Helper function to cleanly disconnect
+  function hardDisconnect(sendLeave = false) {
+    /* 🆕 Stop local timers to prevent stale mutations */
+    stopClock()
+
+    /* 1️⃣  Close whatever the hook gives us */
+    if (closeConnection) {
+      closeConnection()
+    }
+
+    /* 2️⃣  If the hook didn't expose a setter, keep our own flag */
+    if (!setConnReady) {
+      setLocallyDisconnected(true) // local React state
+    } else {
+      setConnReady(false) // will update provider + UI
+    }
+
+    /* 3️⃣  Tell the signalling server we're done (optional but nice) */
+    if (sendLeave) {
+      push({ type: "leave" }) // broadcast exactly once
+    }
   }
-  res.status(200).json(serverInfo)
-})
 
-// Check if game is ready to start (for creators and viewers to poll)
-app.get("/api/game-status/:pin", (req, res) => {
-  const { pin } = req.params
+  // Shared resignation helper
+  function finishResign(
+    winningColour: "white" | "black",
+    local: boolean, // ← new flag: did *I* click resign?
+  ) {
+    stopClock()
+    setResigned(true)
+    setStatus("checkmate")
 
-  const room = pinToRoom.get(pin)
-  if (!room) {
-    return res.status(404).json({ error: "Room not found" })
+    /* banner text */
+    const winnerTxt = winningColour === "white" ? "White" : "Black"
+    const banner = local
+      ? `You resigned. ${winnerTxt} wins!`
+      : `${winnerTxt === "White" ? "Black" : "White"} resigned. ${winnerTxt} wins!`
+
+    setGameEndMessage(banner)
+
+    /* score */
+    // Determine who gets the point based on who won
+    const creatorColorThisGame = colourOfCreator()
+    const creatorWon = winningColour === creatorColorThisGame
+
+    console.log(
+      "finishResign - winningColour:",
+      winningColour,
+      "creatorColorThisGame:",
+      creatorColorThisGame,
+      "creatorWon:",
+      creatorWon,
+      "isCreator:",
+      isCreator,
+    )
+
+    if (creatorWon) {
+      // Creator won - creator is always player1NameForScore
+      console.log("Awarding point to creator (player1)")
+      setPlayer1Score((p) => p + 1)
+    } else {
+      // Joiner won - joiner is always player2NameForScore
+      console.log("Awarding point to joiner (player2)")
+      setPlayer2Score((p) => p + 1)
+    }
+
+    playSound("resign")
+
+    /* Show rematch modal after a brief delay */
+    setTimeout(() => {
+      setShowPostResignationModal(true)
+    }, 2000) // 2 second delay to let players read the resignation message
   }
 
-  const gameReady = room.state === "active" && room.joiner.name
-  const isPlayerPin = pin === room.playerPin
-  const isViewerPin = pin === room.viewerPin
+  const updateStatus = (g: Chess, moverColour: "w" | "b" | null = null) => {
+    let message: string | null = null
+    let winner: "white" | "black" | null = null
+    let isDraw = false
 
-  res.json({
-    gameReady,
-    state: room.state,
-    creatorName: room.creator.name,
-    joinerName: room.joiner.name,
-    playerPin: room.playerPin,
-    viewerPin: room.viewerPin,
-    settings: room.settings,
-    pinType: isPlayerPin ? "player" : isViewerPin ? "viewer" : "unknown",
-    allowConnection: gameReady || isPlayerPin, // Players can connect to lobby, viewers need active game
-  })
-})
+    if (g.isCheckmate()) {
+      setStatus("checkmate")
+      stopClock()
+      playSound("checkmate")
+      winner = g.turn() === "w" ? "black" : "white" // The player who just moved won
+      message = `${winner === "white" ? "White" : "Black"} Won by Checkmate!`
+    } else if (g.isStalemate()) {
+      setStatus("stalemate")
+      stopClock()
+      playSound("stalemate")
+      isDraw = true
+      message = "Stalemate!"
+    } else if (g.isDraw()) {
+      setStatus("draw")
+      stopClock()
+      playSound("draw")
+      isDraw = true
+      message = "Draw!"
+    } else if (whiteMs <= 0) {
+      // Check for timeout *before* setting to playing
+      setStatus("checkmate") // Treat timeout as a loss (checkmate status)
+      stopClock()
+      playSound("time_out")
 
-// Get active rooms (for debug)
-app.get("/api/rooms", (req, res) => {
-  const roomsInfo = Array.from(gameRooms.entries()).map(([roomId, room]) => ({
-    roomId,
-    playerPin: room.playerPin,
-    viewerPin: room.viewerPin,
-    state: room.state,
-    creatorName: room.creator.name,
-    hasJoiner: !!room.joiner,
-    joinerName: room.joiner?.name || null,
-    viewerCount: room.viewers.length,
-  }))
+      // Handle timeout as resignation locally
+      const winningColour = "black" // White timed out, Black wins
+      finishResign(winningColour, true) // Handle locally like a resignation
 
-  res.json(roomsInfo)
-})
+      // Notify opponent about timeout (auto-resignation)
+      if (connReady) {
+        push({ type: "resign" })
+        console.log("White timed out - sending auto-resign to opponent")
+      }
+      return // Exit early to prevent double score update
+    } else if (blackMs <= 0) {
+      // Check for timeout *before* setting to playing
+      setStatus("checkmate") // Treat timeout as a loss (checkmate status)
+      stopClock()
+      playSound("time_out")
 
-// Log WebSocket server info
-wss.on("listening", () => {
-  console.log(`WebSocket server is listening on port ${port}`)
-})
+      // Handle timeout as resignation locally
+      const winningColour = "white" // Black timed out, White wins
+      finishResign(winningColour, true) // Handle locally like a resignation
 
-// Log WebSocket errors
-wss.on("error", (error) => {
-  console.error("WebSocket server error:", error)
-})
+      // Notify opponent about timeout (auto-resignation)
+      if (connReady) {
+        push({ type: "resign" })
+        console.log("Black timed out - sending auto-resign to opponent")
+      }
+      return // Exit early to prevent double score update
+    } else {
+      setStatus("playing")
+      startClock(moverColour === "w" ? "b" : "w") // other side to move
+      if (g.isCheck()) {
+        playSound("check") // Play check sound
+      }
+    }
 
-// Start the server
-server.listen(port, "0.0.0.0", () => {
-  console.log(`Server running on port ${port}`)
-  console.log(`Health check available at: http://localhost:${port}/health`)
-  console.log(`WebSocket server ready for connections`)
-})
+    // Update scores and message if game ended
+    if (message) {
+      setGameEndMessage(message)
+      if (isDraw) {
+        setPlayer1Score((prev) => prev + 0.5)
+        setPlayer2Score((prev) => prev + 0.5)
+      } else if (winner) {
+        // Determine who gets the point based on who won
+        const creatorColorThisGame = colourOfCreator()
+        const creatorWon = winner === creatorColorThisGame
+
+        console.log(
+          "updateStatus - winner:",
+          winner,
+          "creatorColorThisGame:",
+          creatorColorThisGame,
+          "creatorWon:",
+          creatorWon,
+        )
+
+        if (creatorWon) {
+          // Creator won - creator is always player1NameForScore
+          console.log("Awarding point to creator (player1)")
+          setPlayer1Score((prev) => prev + 1)
+        } else {
+          // Joiner won - joiner is always player2NameForScore
+          console.log("Awarding point to joiner (player2)")
+          setPlayer2Score((prev) => prev + 1)
+        }
+      }
+
+      // Note: No game_end message needed for natural endings (checkmate, stalemate, draw by rules)
+      // Both players detect these when processing the same final move
+      // game_end messages are only used for manual endings (resignation, timeout, draw offers)
+
+      /* Show rematch modal after a brief delay for natural game endings */
+      setTimeout(() => {
+        setShowPostResignationModal(true)
+      }, 2000)
+    }
+  }
+
+  // Add these new callback functions after the `updateStatus` function:
+  const handleBoardMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!boardContainerRef.current) return
+
+      const rect = boardContainerRef.current.getBoundingClientRect()
+      const x = event.clientX - rect.left
+      const y = event.clientY - rect.top
+
+      const squareSize = boardSize / 8
+
+      let fileIndex = Math.floor(x / squareSize)
+      let rankIndex = Math.floor(y / squareSize)
+
+      // Adjust for board orientation
+      if (myBoardOrientation === "black") {
+        fileIndex = 7 - fileIndex
+        rankIndex = 7 - rankIndex
+      }
+
+      const file = String.fromCharCode(97 + fileIndex)
+      const rank = 8 - rankIndex // Ranks are 8 at top, 1 at bottom
+
+      setTempMouseDownSquare(`${file}${rank}`)
+    },
+    [boardSize, myBoardOrientation], // Added myBoardOrientation to dependencies
+  )
+
+  const handleBoardMouseUp = useCallback(() => {
+    setTempMouseDownSquare(null)
+  }, [])
+
+  /* called by react-chessboard while dragging */
+  const onDragMove = useCallback((piece: string, sourceSq: string, targetSq: string, pixDelta: [number, number]) => {
+    setDragVec(pixDelta) // save latest Δx, Δy
+  }, [])
+
+  /* ---------- apply a move that came from peer ---------- */
+  const applyRemoteMove = (uci: string, timeSpent: number) => {
+    const g = cloneWithHistory(gameRef.current) // <-- preserve history
+
+    try {
+      const moverColour = g.turn() // before move
+      const move = g.move({
+        from: uci.slice(0, 2),
+        to: uci.slice(2, 4),
+        promotion: uci[4] as any,
+      })
+      if (!move) throw new Error("illegal")
+
+      // Sounds
+      if (move.captured) playSound("capture")
+      else if (move.san.includes("O-O")) playSound("castle")
+      else playSound("move")
+
+      setLastMoveSquares({ from: move.from, to: move.to })
+
+      // subtract spent time from that colour & add increment
+      const inc = TIME_CONTROLS[timeCtrl].inc
+      if (moverColour === "w") setWhiteMs((ms) => ms - timeSpent + inc)
+      else setBlackMs((ms) => Math.max(ms - timeSpent + inc, 0))
+
+      // --- NEW: Apply pre-moves ---
+      const finalBoard = g // Start with the board after opponent's move
+      let appliedPremoveCount = 0
+
+      // Clear premoves and highlights before attempting to apply them,
+      // as they will be re-evaluated based on the new board state.
+      // This also handles the case where no premoves are valid.
+      setPremoveHighlights({})
+      setPremove([])
+
+      for (const premoveUci of premoves) {
+        const premoveFrom = premoveUci.slice(0, 2)
+        const premoveTo = premoveUci.slice(2, 4)
+        const premovePromotion = premoveUci[4] as any
+
+        const appliedPremove = finalBoard.move({ from: premoveFrom, to: premoveTo, promotion: premovePromotion })
+
+        if (appliedPremove) {
+          // Premove was valid and applied
+          appliedPremoveCount++
+          // Play sound for the executed premove
+          if (appliedPremove.captured) {
+            playSound("capture")
+          } else if (appliedPremove.san.includes("O-O")) {
+            playSound("castle")
+          } else {
+            playSound("move")
+          }
+          // Continue to next premove in queue
+        } else {
+          // Premove is invalid, cancel all remaining premoves
+          playSound("premove_cancel")
+          break // Exit loop, no more premoves will be applied
+        }
+      }
+
+      // Commit final board state once at the end
+      setGame(finalBoard)
+
+      // Update status based on final board state
+      if (appliedPremoveCount > 0) {
+        updateStatus(finalBoard, moverColour === "w" ? "b" : "w") // Update status based on the last move's turn
+      } else {
+        updateStatus(finalBoard, moverColour) // Use original mover colour
+      }
+
+      // Ensure premoves and highlights are cleared after processing
+      setPremove([])
+      setPremoveHighlights({})
+    } catch (error) {
+      console.warn("[sync] rejected duplicated or out-of-order move", uci, error)
+      return // simply ignore duplicates
+    }
+  }
+
+  // Message handler functions - moved to component level to be accessible by registerMessageCallback
+  const handleMove = useCallback((data: { uci: string; spent: number }) => {
+    applyRemoteMove(data.uci, data.spent)
+  }, []) // No dependencies needed since applyRemoteMove uses refs
+
+  const handleResign = useCallback(() => {
+    if (status !== "playing") return
+    if (resigned) return // already processed - safeguard against double clicks
+    push({ type: "resign" }) // notify peer
+    const winner = myBoardOrientation === "white" ? "black" : "white"
+    finishResign(winner, true) // ← local = true
+  }, [status, resigned, push, myBoardOrientation])
+
+  const handleRemoteResign = useCallback(() => {
+    if (resigned) return // ignore duplicates
+    console.log("Opponent resigned (could be manual resignation or timeout)")
+    finishResign(myBoardOrientation, false) // ← your colour is the winner
+  }, [resigned, myBoardOrientation])
+
+  const handleRematchOffer = useCallback(
+    (fromPlayer?: string) => {
+      // Receiving a rematch offer - show modal for accept/decline
+      if (fromPlayer) {
+        console.log(`Received rematch offer from ${fromPlayer}`)
+        setRematchOfferedBy(fromPlayer)
+        setRematchOfferReceived(true)
+        playSound("button_click") // Play notification sound
+      } else {
+        // This player is making a rematch offer
+        if (status !== "playing" && status !== "countdown") {
+          startFreshGame() // countdown will start when game_start arrives
+        }
+      }
+    },
+    [status, startFreshGame, playSound],
+  )
+
+  const handleRematchAccept = useCallback(() => {
+    if (status !== "playing" && status !== "countdown") {
+      // Both players are already connected - just start fresh game
+      console.log("Accepting rematch - both players already connected")
+      startFreshGame()
+    }
+  }, [status, startFreshGame])
+
+  // Function to accept rematch offer
+  const acceptRematchOffer = useCallback(() => {
+    console.log("Accepting rematch offer")
+    setRematchOfferReceived(false)
+    setRematchOfferedBy("")
+
+    // Send rematch accept message to opponent
+    push({ type: "rematch-accept" })
+
+    // Start fresh game locally
+    startFreshGame()
+    playSound("button_click")
+  }, [push, startFreshGame, playSound])
+
+  // Function to decline rematch offer
+  const declineRematchOffer = useCallback(() => {
+    console.log("Declining rematch offer")
+    setRematchOfferReceived(false)
+    setRematchOfferedBy("")
+
+    // Could send a decline message if needed in the future
+    // push({ type: "rematch-decline" });
+
+    playSound("button_click")
+  }, [playSound])
+
+  // Function to offer draw
+  const offerDraw = useCallback(() => {
+    if (status !== "playing") return // Only allow during active games
+    if (drawOfferSent) return // Prevent multiple offers
+
+    console.log("Offering draw to opponent")
+    setDrawOfferSent(true)
+
+    // Send draw offer message to opponent
+    push({ type: "draw-offer" })
+    playSound("button_click")
+  }, [status, drawOfferSent, push, playSound])
+
+  // Function to accept draw offer
+  const acceptDrawOffer = useCallback(() => {
+    console.log("Accepting draw offer")
+    setDrawOfferReceived(false)
+    setDrawOfferedBy("")
+    setDrawOfferSent(false)
+
+    // Send draw accept message to opponent
+    push({ type: "draw-accept" })
+
+    // End the game as draw locally
+    setStatus("draw")
+    stopClock()
+    playSound("draw")
+
+    const message = "Draw by Agreement!"
+    setGameEndMessage(message)
+
+    // Both players get 0.5 points
+    setPlayer1Score((prev) => prev + 0.5)
+    setPlayer2Score((prev) => prev + 0.5)
+
+    /* Show rematch modal after a brief delay for draw by agreement */
+    setTimeout(() => {
+      setShowPostResignationModal(true)
+    }, 2000)
+  }, [push, playSound])
+
+  // Function to decline draw offer
+  const declineDrawOffer = useCallback(() => {
+    console.log("Declining draw offer")
+    setDrawOfferReceived(false)
+    setDrawOfferedBy("")
+    playSound("button_click")
+  }, [playSound])
+
+  // Function to handle receiving draw offer
+  const handleDrawOffer = useCallback(
+    (fromPlayer: string) => {
+      console.log(`Received draw offer from ${fromPlayer}`)
+      setDrawOfferedBy(fromPlayer)
+      setDrawOfferReceived(true)
+      playSound("notification")
+    },
+    [playSound],
+  )
+
+  // Function to handle draw accept
+  const handleDrawAccept = useCallback(() => {
+    console.log("Draw offer accepted by opponent")
+    setDrawOfferSent(false)
+
+    // End the game as draw locally
+    setStatus("draw")
+    stopClock()
+    playSound("draw")
+
+    const message = "Draw by Agreement!"
+    setGameEndMessage(message)
+
+    // Both players get 0.5 points
+    setPlayer1Score((prev) => prev + 0.5)
+    setPlayer2Score((prev) => prev + 0.5)
+
+    /* Show rematch modal after a brief delay for draw by agreement */
+    setTimeout(() => {
+      setShowPostResignationModal(true)
+    }, 2000)
+  }, [playSound])
+
+  // Function to handle post-resignation rematch offer
+  const handlePostResignationRematch = useCallback(() => {
+    console.log("Offering rematch after resignation")
+    setShowPostResignationModal(false)
+
+    // Use the existing rematch system
+    if (connReady && status !== "playing" && status !== "countdown") {
+      console.log("Sending rematch offer to opponent")
+      pushRematchOffer()
+      setRematchOfferSent(true)
+      playSound("button_click")
+    }
+  }, [connReady, status, pushRematchOffer, playSound])
+
+  // Function to decline post-resignation rematch
+  const handlePostResignationDecline = useCallback(() => {
+    console.log("Declining rematch after resignation")
+    setShowPostResignationModal(false)
+    // Players stay connected but no rematch
+  }, [])
+
+  // Register message callbacks
+  useEffect(() => {
+    registerMessageCallback("move", handleMove)
+    registerMessageCallback("resign", handleRemoteResign)
+    registerMessageCallback("rematch-offer", handleRematchOffer)
+    registerMessageCallback("rematch-accept", handleRematchAccept)
+    registerMessageCallback("draw-offer", handleDrawOffer)
+    registerMessageCallback("draw-accept", handleDrawAccept)
+    registerMessageCallback(
+      "game_end",
+      (data: { winner: "white" | "black" | null; isDraw: boolean; message: string }) => {
+        setStatus("game_end")
+        setGameEndMessage(data.message)
+        if (data.winner === "white") {
+          setPlayer1Score((prev) => prev + 1)
+        } else if (data.winner === "black") {
+          setPlayer2Score((prev) => prev + 1)
+        }
+      },
+    )
+    registerMessageCallback(
+      "timer_sync",
+      (data: { whiteMs: number; blackMs: number; status: string; gameNo: number; fen: string }) => {
+        setWhiteMs(data.whiteMs)
+        setBlackMs(data.blackMs)
+        setStatus(data.status as Status)
+        setGameNo(data.gameNo)
+        setGame(new Chess(data.fen))
+      },
+    )
+    registerMessageCallback("heartbeat", (data: { whiteMs: number; blackMs: number }) => {
+      lastOpponentHeartbeat.current = Date.now()
+      setOpponentConnected(true)
+    })
+    registerMessageCallback("connection_status", (data: { creatorConnected: boolean; joinerConnected: boolean }) => {
+      setViewerConnectionStatus(data)
+    })
+    registerMessageCallback(
+      "game_created",
+      (data: { playerPin: string; viewerPin: string; isCreator: boolean; creatorName: string }) => {
+        if (data.isCreator) {
+          webRTCData.setPlayerPin(data.playerPin)
+          webRTCData.setViewerPin(data.viewerPin)
+          setCreatorName(data.creatorName)
+        } else {
+          setJoinerName(data.creatorName)
+        }
+      },
+    )
+    registerMessageCallback("opponent-joined", (data: { joinerName: string }) => {
+      setJoinerName(data.joinerName)
+    })
+    registerMessageCallback(
+      "viewer-joined",
+      (data: { creatorName: string; joinerName: string; viewerCount: number }) => {
+        setCreatorName(data.creatorName)
+        setJoinerName(data.joinerName)
+        webRTCData.setViewerCount(data.viewerCount)
+      },
+    )
+    registerMessageCallback(
+      "game_start",
+      (data: {
+        settings: { timeControl: TCId; totalGames: number; countdown: number }
+        creatorName: string
+        joinerName: string
+        timestamp: number
+      }) => {
+        setCreatorName(data.creatorName)
+        setJoinerName(data.joinerName)
+        setTimeCtrl(data.settings.timeControl)
+        setCountDown(data.settings.countdown * 1000)
+        setGame(new Chess())
+        setStatus("countdown")
+      },
+    )
+    registerMessageCallback("error", (data: { message: string }) => {
+      console.error("Error received:", data.message)
+    })
+  }, [
+    registerMessageCallback,
+    handleMove,
+    handleRemoteResign,
+    handleRematchOffer,
+    handleRematchAccept,
+    handleDrawOffer,
+    handleDrawAccept,
+    webRTCData,
+  ])
+
+  return <div>{/* Game UI components here */}</div>
+}
